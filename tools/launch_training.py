@@ -37,7 +37,7 @@ def main():
         command = [sys.executable, '-u', str(snapshot/'train.py'), '--config', f'configs/{name}.json',
                    '--data-root', str((root/'data'/config['dataset']).resolve()),
                    '--output', str(output), '--cache-root', str(root/'.cache/data'),
-                   '--cache-device', 'cuda', '--precision', 'bf16', '--seed', '42']
+                   '--cache-device', 'cuda', '--precision', config.get('precision', 'bf16'), '--seed', '42']
         environment = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu, OMP_NUM_THREADS='4')
         with (output/'train.log').open('ab') as log:
             child = subprocess.Popen(command, cwd=snapshot, env=environment, stdout=log,

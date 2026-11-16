@@ -16,6 +16,7 @@ from model import STMamba
 from training.losses import DeepSupervisionLoss
 from training.data import cached_split, prepare_batch, validate_splits, remap_synapse
 from training.metrics import binary_metrics, volume_metrics
+from torch.utils.data import DataLoader
 
 
 def atomic_json(path, data):
@@ -53,7 +54,7 @@ def synapse_evaluate(model, config, root, batch_size, device, amp):
     names = (Path(config.get('list_dir', 'training/splits/synapse'))/'test_vol.txt').read_text().splitlines()
     for name in names:
         with h5py.File(Path(root)/'test_vol_h5'/f'{name}.npy.h5') as source:
-            image, target = source['image'][:], source['label'][:]
+            image, target = np.asarray(source['image'][:], dtype=np.float32), source['label'][:]
         target = remap_synapse(target, config.get('label_format', 'original13'))
         size = config['image_size']
         resized = np.stack([zoom(sl, (size/sl.shape[0], size/sl.shape[1]), order=3) for sl in image]).astype(np.float32)
@@ -61,7 +62,13 @@ def synapse_evaluate(model, config, root, batch_size, device, amp):
         predictions = []
         for start in range(0, len(x), batch_size):
             with amp():
-                result = model(x[start:start+batch_size]*2-1).float().argmax(1).cpu().numpy()
+                batch = x[start:start+batch_size]
+                if config.get('training_protocol') == 'legacy85':
+                    from training.synapse_data import normalize_ct
+                    batch = normalize_ct(batch)
+                else:
+                    batch = batch*2-1
+                result = model(batch).float().argmax(1).cpu().numpy()
             predictions.extend(zoom(sl, (target.shape[-2]/size, target.shape[-1]/size), order=0) for sl in result)
         predicted = np.stack(predictions)
         record = {'case':name, 'organs':{str(k):volume_metrics(predicted==k, target==k)
@@ -88,20 +95,26 @@ def main():
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--precision', choices=['fp32','bf16'], default='bf16')
+    parser.add_argument('--precision', choices=['fp32','bf16'])
     parser.add_argument('--resume')
     parser.add_argument('--test-only', action='store_true')
     parser.add_argument('--checkpoint')
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text())
+    args.precision = args.precision or config.get('precision', 'bf16')
     if args.epochs is not None: config['epochs'] = args.epochs
     if args.batch_size is not None: config['batch_size'] = args.batch_size
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.set_num_threads(4)
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False
-    torch.set_float32_matmul_precision('high')
+    torch.backends.cudnn.enabled = config.get('cudnn_enabled', True)
+    torch.backends.cudnn.benchmark = not config.get('deterministic', False)
+    torch.backends.cudnn.deterministic = config.get('deterministic', False)
+    torch.set_float32_matmul_precision(config.get('matmul_precision', 'high'))
+    legacy_synapse = config.get('training_protocol') == 'legacy85'
+    if legacy_synapse:
+        import imgaug
+        imgaug.seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type != 'cuda':
         raise RuntimeError('STMamba requires a CUDA GPU for selective scan')
@@ -117,11 +130,18 @@ def main():
     if not pretrained.is_file():
         raise FileNotFoundError('Missing encoder checkpoint; run python tools/download_pretrained.py')
     model = STMamba(num_classes=config['num_classes'], fusion_options=config.get('fusion_options')).to(device)
-    objective = DeepSupervisionLoss(config.get('aux_weight', .2))
+    objective = DeepSupervisionLoss(config.get('aux_weight', .2), config.get('ce_weight', .4), config.get('dice_weight', .6))
     batch_size = config['batch_size']
     if not args.test_only:
         cache_device = device if args.cache_device == 'cuda' else torch.device('cpu')
-        train = cached_split(config, args.data_root, 'train', args.cache_root, cache_device, args.workers)
+        if legacy_synapse:
+            from training.synapse_data import CachedSynapseDataset, seed_worker
+            workers = config.get('workers', 6)
+            dataset = CachedSynapseDataset(config, args.data_root, args.cache_root, workers)
+            train = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=workers,
+                               pin_memory=True, persistent_workers=workers>0, worker_init_fn=seed_worker)
+        else:
+            train = cached_split(config, args.data_root, 'train', args.cache_root, cache_device, args.workers)
         val = cached_split(config, args.data_root, 'val', args.cache_root, cache_device, args.workers) if config['task']=='binary' else None
         optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config['epochs'], eta_min=config['min_lr'])
@@ -139,20 +159,28 @@ def main():
         for epoch in range(start_epoch, config['epochs']):
             begin = time.perf_counter()
             model.train()
-            order = torch.randperm(len(train[0]), device=train[0].device)
+            if legacy_synapse:
+                batches = train
+                batch_count = len(train)
+            else:
+                order = torch.randperm(len(train[0]), device=train[0].device)
+                batches = ((train[0][indices].to(device), train[1][indices].to(device))
+                           for indices in order.split(batch_size))
+                batch_count = math.ceil(len(order)/batch_size)
             total, seen = 0., 0
-            for step, start in enumerate(range(0, len(order), batch_size)):
-                indices = order[start:start+batch_size]
-                # Keep the final short batch; the datasets all have enough pixels for BN.
-                images, masks = train[0][indices].to(device), train[1][indices].to(device)
-                images, masks = prepare_batch(images, masks, config['task'], augment=True)
+            for step, (images, masks) in enumerate(batches):
+                images, masks = images.to(device, non_blocking=True), masks.to(device, non_blocking=True)
+                if not legacy_synapse:
+                    images, masks = prepare_batch(images, masks, config['task'], augment=True)
                 optimizer.zero_grad(set_to_none=True)
                 with amp():
-                    predictions = model(images, return_aux=True)
+                    predictions = model(images, return_aux=config.get('supervision') != 'final')
                     loss = objective(predictions, masks)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f'Nonfinite loss at epoch {epoch+1}, step {step}')
                 loss.backward()
+                if config.get('gradient_clip_norm'):
+                    gradient_norm_before_clip = torch.nn.utils.clip_grad_norm_(model.parameters(), config['gradient_clip_norm'])
                 if epoch == 0 and step == 0:
                     encoder_parameters = list(model.encoder.parameters())
                     gradient_norm = torch.linalg.vector_norm(torch.stack([
@@ -160,11 +188,14 @@ def main():
                         if parameter.grad is not None]))
                     print(json.dumps({'event':'first_step_encoder_gradient',
                                       'all_encoder_parameters_trainable':all(p.requires_grad for p in encoder_parameters),
-                                      'encoder_gradient_norm':gradient_norm.item()}), flush=True)
+                                      'encoder_gradient_norm':gradient_norm.item(),
+                                      'precision':args.precision,'gradient_clip_norm':config.get('gradient_clip_norm'),
+                                      'loss_ce_weight':objective.ce_weight,'loss_dice_weight':objective.dice_weight,
+                                      'aux_weight':objective.aux_weight}), flush=True)
                 optimizer.step()
-                total += loss.detach().item()*len(indices); seen += len(indices)
+                total += loss.detach().item()*len(images); seen += len(images)
                 if step % 20 == 0:
-                    print(f'epoch={epoch+1}/{config["epochs"]} step={step+1}/{math.ceil(len(order)/batch_size)} loss={loss.item():.6f}', flush=True)
+                    print(f'epoch={epoch+1}/{config["epochs"]} step={step+1}/{batch_count} loss={loss.item():.6f}', flush=True)
             metrics = binary_evaluate(model, val, config, batch_size, amp) if val is not None else None
             improved = metrics is not None and metrics['dice'] > best
             if improved: best = metrics['dice']

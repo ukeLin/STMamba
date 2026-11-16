@@ -5,11 +5,13 @@ import torch.nn.functional as F
 
 
 class DeepSupervisionLoss(nn.Module):
-    def __init__(self, aux_weight=0.2):
+    def __init__(self, aux_weight=0.2, ce_weight=0.4, dice_weight=0.6):
         super().__init__()
         if aux_weight < 0:
             raise ValueError('aux_weight must be nonnegative')
         self.aux_weight = float(aux_weight)
+        self.ce_weight = float(ce_weight)
+        self.dice_weight = float(dice_weight)
 
     def single(self, logits, target):
         if target.ndim == 3:
@@ -28,7 +30,7 @@ class DeepSupervisionLoss(nn.Module):
         axes = (0, 2, 3)
         dice = 1 - ((2 * (probability * target).sum(axes) + 1e-5) /
                     (probability.square().sum(axes) + target.square().sum(axes) + 1e-5)).mean()
-        return 0.4 * ce + 0.6 * dice
+        return self.ce_weight * ce + self.dice_weight * dice
 
     def forward(self, predictions, target):
         if isinstance(predictions, (tuple, list)):

@@ -12,7 +12,7 @@ This is the revised SC-CTF implementation. Its decoder differs from the earlier 
 - Four SGS paths, paired as `(P1,reverse(P1))` and `(P2,reverse(P2))`, with shared inputs and VSS weights within each pair.
 - A two-level conditional fusion tree with spatial Softmax gates and an input residual.
 - Decoder scales `/32,/16,/8,/4`, followed by two 2x adaptive expansion layers.
-- Five supervised outputs: final weight 1, each auxiliary weight 0.2, normalized by 1.8. Each head uses `0.4 CE + 0.6 Dice`.
+- Five prediction heads support progressive guidance. ISIC uses final loss weight 1 and auxiliary weights 0.2, normalized by 1.8, with `0.4 CE + 0.6 Dice`. Synapse directly supervises only the final output with `0.5 CE + 0.5 Dice`.
 
 
 
@@ -78,9 +78,9 @@ CUDA_VISIBLE_DEVICES=2 python train.py --config configs/isic2018.json \
   --data-root data/ISIC2018 --output runs/isic2018
 ```
 
-Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, and cosine decay to `1e-6`. The pretrained encoder and decoder are jointly optimized from the first epoch. bf16 is enabled by default; use `--precision fp32` to disable it.
+Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, and cosine decay to `1e-6`. The pretrained encoder and decoder are jointly optimized from the first epoch. Synapse uses FP32 with gradient norm clipping at 1.0; ISIC defaults to bf16. Precision is selected from the dataset configuration unless overridden by `--precision`.
 
-Deterministic decoding/resizing is cached on disk and loaded onto the GPU once. Random augmentation remains online. Use `--cache-device cpu` when GPU memory is limited. Run configuration, epoch history, checkpoints and test results are saved in `--output`.
+ISIC caches deterministic decoding/resizing and loads the tensors onto the GPU once. Synapse caches raw decoded slices in CPU-accessible memory maps, applies its original random augmentation at native resolution, and then resizes to 224x224. Random augmentation remains online. Run configuration, epoch history, checkpoints and test results are saved in `--output`.
 
 ```bash
 # Resume optimizer, scheduler and RNG state.
@@ -92,7 +92,7 @@ python train.py --config configs/isic2017.json --data-root data/ISIC2017 \
   --output runs/isic2017 --test-only --checkpoint runs/isic2017/last.pt
 ```
 
-Training uses independent horizontal/vertical flips and random 90-degree rotations. ISIC uses ImageNet normalization; Synapse intensities are transformed from [0,1] to [-1,1]. Masks use nearest-neighbor resizing. The loss implementation is in `training/losses.py`.
+ISIC augmentation uses horizontal/vertical flips and random 90-degree rotations. Synapse uses the original SomeOf(0--4) augmentation recipe: vertical flipping, Gaussian noise, blur, contrast, scaling, rotation, shear, piecewise affine deformation, and translation. Both datasets use three-channel ImageNet normalization; Synapse additionally clamps augmented/resized CT intensities to [0,1] before normalization. Masks use nearest-neighbor resizing. The loss implementation is in `training/losses.py`.
 
 The last checkpoint is tested after training. ISIC validation additionally saves `best.pt`; test data never selects checkpoints. Synapse has no extra validation partition in the supplied protocol and tests only after training. Binary metrics are per-image means at the configured input resolution, not native-resolution challenge scores. Synapse predictions are restored to the original grid for per-volume Dice and HD95 in voxel units; undefined HD95 values and their count are recorded explicitly.
 
