@@ -7,7 +7,7 @@ import torch
 from model.vmamba.saliency_scan import shape_guided_paths, scan, merge
 from model import STMamba
 from model.STMamba import STMamba as PublicModel
-from paper_loss import DeepSupervisionLoss
+from training.losses import DeepSupervisionLoss
 
 torch.set_num_threads(4)
 torch.manual_seed(42)

@@ -24,9 +24,9 @@ def main():
     if snapshot.exists():
         raise FileExistsError(f'Run already exists: {run_root}')
     snapshot.mkdir(parents=True)
-    for folder in ('model', 'training', 'configs', 'lists'):
+    for folder in ('model', 'training', 'configs'):
         shutil.copytree(root/folder, snapshot/folder, ignore=shutil.ignore_patterns('__pycache__', 'pretrain', '*.pyc'))
-    for filename in ('train.py', 'paper_loss.py'):
+    for filename in ('train.py',):
         shutil.copy2(root/filename, snapshot/filename)
     (snapshot/'model/pretrain').symlink_to(root/'model/pretrain', target_is_directory=True)
     records = []

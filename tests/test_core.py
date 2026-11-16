@@ -4,7 +4,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 import pytest
 import torch
-from paper_loss import DeepSupervisionLoss
+from training.losses import DeepSupervisionLoss
 from training.data import remap_synapse, prepare_batch
 from training.metrics import binary_metrics, volume_metrics
 from model.complementary_fusion import prediction_condition, ShapeConditionedCTF

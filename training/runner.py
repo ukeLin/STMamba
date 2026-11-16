@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from loguru import logger
 from model import STMamba
-from paper_loss import DeepSupervisionLoss
+from training.losses import DeepSupervisionLoss
 from training.data import cached_split, prepare_batch, validate_splits, remap_synapse
 from training.metrics import binary_metrics, volume_metrics
 
@@ -50,7 +50,7 @@ def binary_evaluate(model, data, config, batch_size, amp):
 def synapse_evaluate(model, config, root, batch_size, device, amp):
     model.eval()
     cases = []
-    names = (Path(config.get('list_dir', 'lists/lists_Synapse'))/'test_vol.txt').read_text().splitlines()
+    names = (Path(config.get('list_dir', 'training/splits/synapse'))/'test_vol.txt').read_text().splitlines()
     for name in names:
         with h5py.File(Path(root)/'test_vol_h5'/f'{name}.npy.h5') as source:
             image, target = source['image'][:], source['label'][:]

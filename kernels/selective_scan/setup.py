@@ -37,7 +37,7 @@ def get_cuda_bare_metal_version(cuda_dir):
 
     return raw_output, bare_metal_version
 
-MODES = os.getenv("SELECTIVE_SCAN_MODES", "oflex").split(",")
+MODES = ["oflex"]
 CXX_STANDARD = os.getenv("SELECTIVE_SCAN_CXX_STANDARD", "c++20" if Version(torch.__version__.split("+")[0]) >= Version("2.10") else "c++17")
 # MODES = ["core", "ndstate", "oflex", "nrow"]
 
@@ -60,7 +60,8 @@ def get_ext():
         if bare_metal_version < Version("11.2"):
             multi_threads = False
             
-    cc_flag.extend(["-gencode", "arch=compute_70,code=sm_70"])
+    if CUDA_HOME is not None and bare_metal_version < Version("13.0"):
+        cc_flag.extend(["-gencode", "arch=compute_70,code=sm_70"])
     cc_flag.extend(["-gencode", "arch=compute_80,code=sm_80"])
     if gencode_sm90:
         cc_flag.extend(["-gencode", "arch=compute_90,code=sm_90"])
@@ -73,41 +74,12 @@ def get_ext():
     if FORCE_CXX11_ABI:
         torch._C._GLIBCXX_USE_CXX11_ABI = True
 
-    sources = dict(
-        core=[
-            "csrc/selective_scan/cus/selective_scan.cpp",
-            "csrc/selective_scan/cus/selective_scan_core_fwd.cu",
-            "csrc/selective_scan/cus/selective_scan_core_bwd.cu",
-        ],
-        nrow=[
-            "csrc/selective_scan/cusnrow/selective_scan_nrow.cpp",
-            "csrc/selective_scan/cusnrow/selective_scan_core_fwd.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_fwd2.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_fwd3.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_fwd4.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_bwd.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_bwd2.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_bwd3.cu",
-            "csrc/selective_scan/cusnrow/selective_scan_core_bwd4.cu",
-        ],
-        ndstate=[
-            "csrc/selective_scan/cusndstate/selective_scan_ndstate.cpp",
-            "csrc/selective_scan/cusndstate/selective_scan_core_fwd.cu",
-            "csrc/selective_scan/cusndstate/selective_scan_core_bwd.cu",
-        ],
-        oflex=[
-            "csrc/selective_scan/cusoflex/selective_scan_oflex.cpp",
-            "csrc/selective_scan/cusoflex/selective_scan_core_fwd.cu",
-            "csrc/selective_scan/cusoflex/selective_scan_core_bwd.cu",
-        ],
-    )
-
-    names = dict(
-        core="selective_scan_cuda_core",
-        nrow="selective_scan_cuda_nrow",
-        ndstate="selective_scan_cuda_ndstate",
-        oflex="selective_scan_cuda_oflex",
-    )
+    sources = {"oflex": [
+        "csrc/selective_scan/cusoflex/selective_scan_oflex.cpp",
+        "csrc/selective_scan/cusoflex/selective_scan_core_fwd.cu",
+        "csrc/selective_scan/cusoflex/selective_scan_core_bwd.cu",
+    ]}
+    names = {"oflex": "selective_scan_cuda_oflex"}
 
     ext_modules = [
         CUDAExtension(

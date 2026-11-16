@@ -52,7 +52,7 @@ def validate_splits(config, root):
         if counts != config['split_counts']:
             raise ValueError(f'Official split mismatch: {counts}, expected {config["split_counts"]}')
     else:
-        folder = Path(config.get('list_dir', 'lists/lists_Synapse'))
+        folder = Path(config.get('list_dir', 'training/splits/synapse'))
         train = (folder/'train.txt').read_text().splitlines()
         test = (folder/'test_vol.txt').read_text().splitlines()
         ids = {'train':{re.match(r'case(\d+)', x)[1] for x in train},
@@ -73,7 +73,7 @@ def cached_split(config, root, split, cache_root, device, workers=8):
     if config['task'] == 'binary':
         records = pairs(root, split)
     else:
-        names = (Path(config.get('list_dir', 'lists/lists_Synapse'))/'train.txt').read_text().splitlines()
+        names = (Path(config.get('list_dir', 'training/splits/synapse'))/'train.txt').read_text().splitlines()
         records = [(Path(root)/'train_npz'/f'{name}.npz', None) for name in names]
     signature = [(str(p.resolve()), p.stat().st_size, p.stat().st_mtime_ns)
                  for record in records for p in record if p is not None]

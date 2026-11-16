@@ -14,7 +14,7 @@ This is the revised SC-CTF implementation. Its decoder differs from the earlier 
 - Decoder scales `/32,/16,/8,/4`, followed by two 2x adaptive expansion layers.
 - Five supervised outputs: final weight 1, each auxiliary weight 0.2, normalized by 1.8. Each head uses `0.4 CE + 0.6 Dice`.
 
-See [architecture and ablations](docs/architecture.md) and [training protocol](docs/training.md).
+
 
 ## Installation
 
@@ -24,7 +24,7 @@ Linux, an NVIDIA GPU and a CUDA toolkit are required. Install a PyTorch build co
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-SELECTIVE_SCAN_MODES=oflex pip install --no-build-isolation ./kernels/selective_scan
+pip install --no-build-isolation ./kernels/selective_scan
 python tools/download_pretrained.py
 ```
 
@@ -51,7 +51,21 @@ data/
 
 Use [official ISIC segmentation splits](https://challenge.isic-archive.com/data/): ISIC2017 **2000/150/600**, ISIC2018 **2594/100/1000** for train/validation/test. Masks use the image stem or `_segmentation.png`. Counts and split disjointness are checked.
 
-Synapse uses the supplied **18 training / 12 test cases**, with **2211 listed training slices**. Targets are **eight organs plus background**, not thirteen organs. Configure `original13` source IDs or already converted `indexed9` labels using the [explicit mapping](docs/training.md#synapse-labels).
+Synapse uses the supplied **18 training / 12 test cases**, with **2211 listed training slices**. Targets are **eight organs plus background**, not thirteen organs. Configure `original13` source IDs or already converted `indexed9` labels in this exact target order:
+
+| Target | Organ | Original source ID |
+| --- | --- | --- |
+| 0 | Background and excluded organs | 0,5,9,10,12,13 |
+| 1 | Aorta | 8 |
+| 2 | Gallbladder | 4 |
+| 3 | Left kidney | 3 |
+| 4 | Right kidney | 2 |
+| 5 | Liver | 6 |
+| 6 | Pancreas | 11 |
+| 7 | Spleen | 1 |
+| 8 | Stomach | 7 |
+
+The same mapping is applied to training and test labels. A different eight-organ class order must be converted explicitly.
 
 ## Training
 
@@ -78,12 +92,13 @@ python train.py --config configs/isic2017.json --data-root data/ISIC2017 \
   --output runs/isic2017 --test-only --checkpoint runs/isic2017/last.pt
 ```
 
-The last checkpoint is tested after training. ISIC validation additionally saves `best.pt`; test data never selects checkpoints. Synapse has no extra validation partition in the supplied protocol and tests only after training.
+Training uses independent horizontal/vertical flips and random 90-degree rotations. ISIC uses ImageNet normalization; Synapse intensities are transformed from [0,1] to [-1,1]. Masks use nearest-neighbor resizing. The loss implementation is in `training/losses.py`.
+
+The last checkpoint is tested after training. ISIC validation additionally saves `best.pt`; test data never selects checkpoints. Synapse has no extra validation partition in the supplied protocol and tests only after training. Binary metrics are per-image means at the configured input resolution, not native-resolution challenge scores. Synapse predictions are restored to the original grid for per-volume Dice and HD95 in voxel units; undefined HD95 values and their count are recorded explicitly.
 
 ## Tests
 
 ```bash
-pip install -r requirements-dev.txt
 pytest tests/test_core.py
 CUDA_VISIBLE_DEVICES=0 python tests/check_model.py
 ```
@@ -92,15 +107,12 @@ CUDA_VISIBLE_DEVICES=0 python tests/check_model.py
 
 ```text
 configs/       Dataset training presets
-docs/          Architecture and protocol
 kernels/       Selective scan CUDA sources
-lists/         Synapse case/slice lists
 model/         Encoder, SGS, SC-CTF and decoder
 tests/         Numerical and model regression checks
 tools/         Weight download and multi-GPU launcher
-training/      Caching, augmentation, metrics and runner
+training/      Losses, caching, splits, metrics and runner
 train.py       Training and checkpoint evaluation
-paper_loss.py  Weighted CE/Dice deep supervision
 ```
 
 ## Acknowledgements

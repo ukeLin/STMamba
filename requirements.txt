@@ -10,4 +10,6 @@ loguru>=0.7
 packaging>=23
 ninja
 wheel
+setuptools>=68
 triton>=2.2; platform_system == "Linux"
+pytest>=8
