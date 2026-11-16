@@ -5,6 +5,7 @@ import math
 import os
 from pathlib import Path
 import random
+import re
 import time
 import h5py
 import numpy as np
@@ -17,6 +18,32 @@ from training.losses import DeepSupervisionLoss
 from training.data import cached_split, prepare_batch, validate_splits, remap_synapse
 from training.metrics import binary_metrics, volume_metrics
 from torch.utils.data import DataLoader
+
+
+@torch.no_grad()
+def monai_validate(model, loader, config, device, amp):
+    model.eval()
+    binary=config['task']=='binary'
+    scores=[];volumes={}
+    for batch in loader:
+        with amp():
+            logits=model(batch['image'].to(device,non_blocking=True)).float()
+        predicted=(logits.sigmoid()>=.5) if binary else logits.argmax(1,keepdim=True)
+        predicted=predicted.cpu().numpy();target=batch['label'].numpy()
+        if binary:
+            scores.extend(binary_metrics(p,t) for p,t in zip(predicted,target))
+        else:
+            for name,p,t in zip(batch['case_name'],predicted,target):
+                match=re.match(r'(case_\d+)_slice(ED|ES)_(\d+)',name)
+                key=match[1]+'_'+match[2]
+                volumes.setdefault(key,[]).append((int(match[3]),p[0],t[0]))
+    if binary:
+        return {key:float(np.mean([r[key] for r in scores])) for key in scores[0]}
+    for rows in volumes.values():
+        rows.sort(key=lambda row:row[0])
+        p,t=np.stack([r[1] for r in rows]),np.stack([r[2] for r in rows])
+        scores.extend(binary_metrics(p==label,t==label)['dice'] for label in range(1,config['num_classes']))
+    return {'dice':float(np.mean(scores)),'volumes':len(volumes)}
 
 
 def atomic_json(path, data):
@@ -51,19 +78,32 @@ def binary_evaluate(model, data, config, batch_size, amp):
 def synapse_evaluate(model, config, root, batch_size, device, amp):
     model.eval()
     cases = []
-    names = (Path(config.get('list_dir', 'training/splits/synapse'))/'test_vol.txt').read_text().splitlines()
+    acdc=config['dataset']=='ACDC'
+    names = (Path(config.get('list_dir', 'training/splits/synapse'))/('test.txt' if acdc else 'test_vol.txt')).read_text().splitlines()
     for name in names:
-        with h5py.File(Path(root)/'test_vol_h5'/f'{name}.npy.h5') as source:
-            image, target = np.asarray(source['image'][:], dtype=np.float32), source['label'][:]
-        target = remap_synapse(target, config.get('label_format', 'original13'))
+        if acdc:
+            with np.load(Path(root)/'test'/name) as source:
+                image,target=np.asarray(source['img'],np.float32),source['label']
+        else:
+            with h5py.File(Path(root)/'test_vol_h5'/f'{name}.npy.h5') as source:
+                image, target = np.asarray(source['image'][:], dtype=np.float32), source['label'][:]
+            target = remap_synapse(target, config.get('label_format', 'original13'))
         size = config['image_size']
-        resized = np.stack([zoom(sl, (size/sl.shape[0], size/sl.shape[1]), order=3) for sl in image]).astype(np.float32)
+        if config.get('data_pipeline')=='monai':
+            from monai.transforms import Resize
+            resize=Resize((size,size),mode='bicubic',align_corners=False)
+            resized=np.stack([np.asarray(resize(sl[None]))[0] for sl in image]).astype(np.float32)
+        else:
+            resized = np.stack([zoom(sl, (size/sl.shape[0], size/sl.shape[1]), order=3) for sl in image]).astype(np.float32)
         x = torch.from_numpy(resized[:, None]).to(device)
         predictions = []
         for start in range(0, len(x), batch_size):
             with amp():
                 batch = x[start:start+batch_size]
-                if config.get('training_protocol') == 'legacy85':
+                if config.get('data_pipeline')=='monai':
+                    from training.monai_data import normalize_volume_batch
+                    batch=normalize_volume_batch(batch,config)
+                elif config.get('training_protocol') == 'legacy85':
                     from training.synapse_data import normalize_ct
                     batch = normalize_ct(batch)
                 else:
@@ -106,6 +146,10 @@ def main():
     if args.batch_size is not None: config['batch_size'] = args.batch_size
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
+    monai_pipeline=config.get('data_pipeline')=='monai'
+    if monai_pipeline:
+        from monai.utils import set_determinism
+        set_determinism(args.seed)
     torch.set_num_threads(4)
     torch.backends.cudnn.enabled = config.get('cudnn_enabled', True)
     torch.backends.cudnn.benchmark = not config.get('deterministic', False)
@@ -135,7 +179,10 @@ def main():
     batch_size = config['batch_size']
     if not args.test_only:
         cache_device = device if args.cache_device == 'cuda' else torch.device('cpu')
-        if legacy_synapse:
+        if monai_pipeline:
+            from training.monai_data import make_loader
+            train=make_loader(config,args.data_root,'train',args.cache_root,config.get('workers',6),args.seed)
+        elif legacy_synapse:
             from training.synapse_data import CachedSynapseDataset, seed_worker
             workers = config.get('workers', 6)
             dataset = CachedSynapseDataset(config, args.data_root, args.cache_root, workers)
@@ -143,7 +190,10 @@ def main():
                                pin_memory=True, persistent_workers=workers>0, worker_init_fn=seed_worker)
         else:
             train = cached_split(config, args.data_root, 'train', args.cache_root, cache_device, args.workers)
-        val = cached_split(config, args.data_root, 'val', args.cache_root, cache_device, args.workers) if config['task']=='binary' else None
+        if monai_pipeline and (config['task']=='binary' or config['dataset']=='ACDC'):
+            val=make_loader(config,args.data_root,'val',args.cache_root,config.get('workers',6),args.seed)
+        else:
+            val = cached_split(config, args.data_root, 'val', args.cache_root, cache_device, args.workers) if config['task']=='binary' else None
         optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config['epochs'], eta_min=config['min_lr'])
         start_epoch, best = 0, -1.
@@ -160,7 +210,7 @@ def main():
         for epoch in range(start_epoch, config['epochs']):
             begin = time.perf_counter()
             model.train()
-            if legacy_synapse:
+            if legacy_synapse or monai_pipeline:
                 batches = train
                 batch_count = len(train)
             else:
@@ -169,9 +219,10 @@ def main():
                            for indices in order.split(batch_size))
                 batch_count = math.ceil(len(order)/batch_size)
             total, seen = 0., 0
-            for step, (images, masks) in enumerate(batches):
+            for step, batch in enumerate(batches):
+                images,masks=(batch['image'],batch['label']) if monai_pipeline else batch
                 images, masks = images.to(device, non_blocking=True), masks.to(device, non_blocking=True)
-                if not legacy_synapse:
+                if not legacy_synapse and not monai_pipeline:
                     images, masks = prepare_batch(images, masks, config['task'], augment=True)
                 optimizer.zero_grad(set_to_none=True)
                 with amp():
@@ -197,7 +248,8 @@ def main():
                 total += loss.detach().item()*len(images); seen += len(images)
                 if step % 20 == 0:
                     print(f'epoch={epoch+1}/{config["epochs"]} step={step+1}/{batch_count} loss={loss.item():.6f}', flush=True)
-            metrics = binary_evaluate(model, val, config, batch_size, amp) if val is not None else None
+            metrics = (monai_validate(model,val,config,device,amp) if monai_pipeline
+                       else binary_evaluate(model, val, config, batch_size, amp)) if val is not None else None
             improved = metrics is not None and metrics['dice'] > best
             if improved: best = metrics['dice']
             scheduler.step()
@@ -219,8 +271,12 @@ def main():
     model.load_state_dict(state['model'])
     print(f'evaluating fixed checkpoint: {checkpoint}', flush=True)
     if config['task']=='binary':
-        test = cached_split(config, args.data_root, 'test', args.cache_root, device, args.workers)
-        metrics = binary_evaluate(model, test, config, batch_size, amp)
+        if monai_pipeline:
+            test=make_loader(config,args.data_root,'test',args.cache_root,config.get('workers',6),args.seed)
+            metrics=monai_validate(model,test,config,device,amp)
+        else:
+            test = cached_split(config, args.data_root, 'test', args.cache_root, device, args.workers)
+            metrics = binary_evaluate(model, test, config, batch_size, amp)
     else:
         metrics = synapse_evaluate(model, config, args.data_root, batch_size, device, amp)
     result = {'status':'complete', 'checkpoint':checkpoint, 'epoch':state['epoch'], 'test':metrics}

@@ -14,3 +14,4 @@ setuptools>=68
 triton>=2.2; platform_system == "Linux"
 pytest>=8
 imgaug==0.4.0
+monai>=1.6

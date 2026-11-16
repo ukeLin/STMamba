@@ -45,6 +45,9 @@ def pairs(root, split):
 
 
 def validate_splits(config, root):
+    if config['dataset'] == 'ACDC':
+        from training.monai_data import acdc_split_counts
+        return acdc_split_counts(config, root)
     if config['task'] == 'binary':
         rows = {split:pairs(root, split) for split in ('train', 'val', 'test')}
         ids = {split:{p.stem for p, _ in values} for split, values in rows.items()}

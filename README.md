@@ -44,10 +44,14 @@ data/
 │   ├── train/{images,masks}/
 │   ├── val/{images,masks}/
 │   └── test/{images,masks}/
-└── ISIC2018/
-    ├── train/{images,masks}/
-    ├── val/{images,masks}/
-    └── test/{images,masks}/
+├── ISIC2018/
+│   ├── train/{images,masks}/
+│   ├── val/{images,masks}/
+│   └── test/{images,masks}/
+└── ACDC/
+    ├── train/            # slice NPZ: img and label
+    ├── valid/            # validation slices
+    └── test/             # ED/ES volume NPZ
 ```
 
 Use [official ISIC segmentation splits](https://challenge.isic-archive.com/data/): ISIC2017 **2000/150/600**, ISIC2018 **2594/100/1000** for train/validation/test. Masks use the image stem or `_segmentation.png`. Counts and split disjointness are checked.
@@ -68,6 +72,8 @@ Synapse uses the supplied **18 training / 12 test cases**, with **2211 listed tr
 
 The same mapping is applied to training and test labels. A different eight-organ class order must be converted explicitly.
 
+ACDC uses the provided subject-disjoint 70/10/20 train/validation/test partition. Labels are background, RV, myocardium and LV. The preprocessed ACDC files store intensities in [-1,1]; the loader converts these back to [0,1] before ImageNet normalization, consistently for training, validation and test. Validation slices are grouped back into ED/ES volumes for Dice computation.
+
 ## Training
 
 ```bash
@@ -77,11 +83,13 @@ CUDA_VISIBLE_DEVICES=1 python train.py --config configs/isic2017.json \
   --data-root data/ISIC2017 --output runs/isic2017
 CUDA_VISIBLE_DEVICES=2 python train.py --config configs/isic2018.json \
   --data-root data/ISIC2018 --output runs/isic2018
+CUDA_VISIBLE_DEVICES=3 python train.py --config configs/acdc.json \
+  --data-root data/ACDC --output runs/acdc
 ```
 
-Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, and cosine decay to `1e-6`. The pretrained encoder and decoder are jointly optimized from the first epoch. Synapse uses FP32 with gradient norm clipping at 1.0; ISIC defaults to bf16. Precision is selected from the dataset configuration unless overridden by `--precision`.
+All presets use 300 epochs, AdamW and cosine decay to `1e-6`. Synapse uses learning rate `1e-3` and batch size 32; ACDC uses `5e-4` and batch size 32; ISIC2017/2018 use `5e-4` and batch size 16. Weight decay is `1e-3` except ACDC (`1e-4`). The encoder and decoder are jointly optimized from epoch one. Synapse/ACDC use FP32 with gradient norm clipping at 1.0; ISIC uses bf16. Precision can be overridden with `--precision`.
 
-ISIC caches deterministic decoding/resizing and loads the tensors onto the GPU once. Synapse caches raw decoded slices in CPU-accessible memory maps, applies its original random augmentation at native resolution, and then resizes to 224x224. Random augmentation remains online. Run configuration, epoch history, checkpoints and test results are saved in `--output`.
+All four v2 presets use MONAI dictionary transforms, `PersistentDataset` disk caching and `CacheDataset` RAM caching. Only deterministic operations are cached. ISIC caches resized RGB input; medical images are cached before random native-grid augmentation and subsequent resizing. MONAI DataLoader supplies independent seeded worker transforms. Run configuration, history, checkpoints and test results are saved in `--output`.
 
 ```bash
 # Resume optimizer, scheduler and RNG state.
@@ -93,14 +101,14 @@ python train.py --config configs/isic2017.json --data-root data/ISIC2017 \
   --output runs/isic2017 --test-only --checkpoint runs/isic2017/last.pt
 ```
 
-ISIC augmentation uses horizontal/vertical flips and random 90-degree rotations. Synapse uses the original SomeOf(0--4) augmentation recipe: vertical flipping, Gaussian noise, blur, contrast, scaling, rotation, shear, piecewise affine deformation, and translation. Both datasets use three-channel ImageNet normalization; Synapse additionally clamps augmented/resized CT intensities to [0,1] before normalization. Masks use nearest-neighbor resizing. The loss implementation is in `training/losses.py`.
+MONAI augmentation uses horizontal/vertical flips and random 90-degree rotations for ISIC, and SomeOf(0--4) over vertical flip, Gaussian noise, smoothing, contrast, affine scaling/rotation/shear/translation and 2D elastic deformation for medical images. These are MONAI implementations of augmentation families, not a bitwise reproduction of imgaug. All use three-channel ImageNet normalization and nearest-neighbor label interpolation. Medical images are clamped to [0,1] after augmentation. Synapse supervises the final prediction with 0.5 CE + 0.5 Dice; ACDC uses 0.4 CE + 0.6 Dice on the final prediction. ISIC retains auxiliary weight 0.2. Losses are in `training/losses.py`.
 
 The last checkpoint is tested after training. ISIC validation additionally saves `best.pt`; test data never selects checkpoints. Synapse has no extra validation partition in the supplied protocol and tests only after training. Binary metrics are per-image means at the configured input resolution, not native-resolution challenge scores. Synapse predictions are restored to the original grid for per-volume Dice and HD95 in voxel units; undefined HD95 values and their count are recorded explicitly.
 
 ## Tests
 
 ```bash
-pytest tests/test_core.py
+pytest tests/test_core.py tests/test_monai_data.py
 CUDA_VISIBLE_DEVICES=0 python tests/check_model.py
 CUDA_VISIBLE_DEVICES=0 python tests/check_mcib.py
 ```
@@ -120,3 +128,5 @@ train.py       Training and checkpoint evaluation
 ## Acknowledgements
 
 The encoder and selective scan build on [VMamba](https://github.com/MzeroMiko/VMamba) and [Mamba](https://github.com/state-spaces/mamba). MCIB's multi-scale context modeling is inspired by [SegMAN (CVPR 2025)](https://openaccess.thecvf.com/content/CVPR2025/html/Fu_SegMAN_Omni-scale_Context_Modeling_with_State_Space_Models_and_Local_CVPR_2025_paper.html); it uses native encoder-stage alignment at H/16, cross-scale pre-mixing and stage-specific residual redistribution. Third-party license texts are preserved in [LICENSES](LICENSES). An additional license grant for original STMamba contributions has not been specified.
+
+The medical data pipeline uses [MONAI](https://github.com/Project-MONAI/MONAI). [MSVM-UNet](https://github.com/gndlwch2w/msvm-unet) is a reference for dataset handling and augmentation families; its original transforms use imgaug/torchvision, whereas this revision implements processing and caching with MONAI.

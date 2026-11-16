@@ -7,14 +7,14 @@
   "label_format": "original13",
   "epochs": 300,
   "batch_size": 32,
-  "lr": 0.0005,
+  "lr": 0.001,
   "weight_decay": 0.001,
   "min_lr": 1e-06,
   "aux_weight": 0.0,
   "ce_weight": 0.5,
   "dice_weight": 0.5,
   "supervision": "final",
-  "training_protocol": "legacy85",
+  "training_protocol": "monai",
   "precision": "fp32",
   "gradient_clip_norm": 1.0,
   "workers": 6,
@@ -23,5 +23,6 @@
   "deterministic": true,
   "architecture": "STMamba-v2-MCIB",
   "bridge_dim": 96,
-  "use_bridge": true
+  "use_bridge": true,
+  "data_pipeline": "monai"
 }

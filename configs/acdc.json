@@ -1,0 +1,37 @@
+{
+  "dataset": "ACDC",
+  "task": "multiclass",
+  "image_size": 224,
+  "num_classes": 4,
+  "list_dir": "training/splits/acdc",
+  "epochs": 300,
+  "batch_size": 32,
+  "lr": 0.0005,
+  "weight_decay": 0.0001,
+  "min_lr": 1e-06,
+  "aux_weight": 0.0,
+  "ce_weight": 0.4,
+  "dice_weight": 0.6,
+  "supervision": "final",
+  "data_pipeline": "monai",
+  "training_protocol": "monai",
+  "precision": "fp32",
+  "gradient_clip_norm": 1.0,
+  "workers": 6,
+  "matmul_precision": "medium",
+  "cudnn_enabled": false,
+  "deterministic": true,
+  "architecture": "STMamba-v2-MCIB",
+  "bridge_dim": 96,
+  "use_bridge": true,
+  "source_intensity_range": [
+    -1,
+    1
+  ],
+  "class_names": [
+    "background",
+    "RV",
+    "myocardium",
+    "LV"
+  ]
+}

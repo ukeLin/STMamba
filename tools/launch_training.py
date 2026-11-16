@@ -12,8 +12,8 @@ import sys
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--run-root', required=True)
-    parser.add_argument('--devices', default='0,1,2')
-    parser.add_argument('--datasets', default='synapse,isic2017,isic2018')
+    parser.add_argument('--devices', default='0,1,2,3')
+    parser.add_argument('--datasets', default='synapse,isic2017,isic2018,acdc')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     run_root = Path(args.run_root).resolve()
