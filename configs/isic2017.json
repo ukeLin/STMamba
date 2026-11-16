@@ -1,4 +1,4 @@
 {"dataset":"ISIC2017", "task":"binary", "image_size":256, "num_classes":1,
  "split_counts":{"train":2000,"val":150,"test":600},
  "epochs":300,"batch_size":32,"lr":0.0005,"weight_decay":0.001,"min_lr":0.000001,
- "freeze_epochs":10,"aux_weight":0.2}
+ "aux_weight":0.2}

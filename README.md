@@ -64,7 +64,7 @@ CUDA_VISIBLE_DEVICES=2 python train.py --config configs/isic2018.json \
   --data-root data/ISIC2018 --output runs/isic2018
 ```
 
-Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, cosine decay to `1e-6`, and encoder freezing for the first 10 epochs, followed by joint optimization. bf16 is enabled by default; use `--precision fp32` to disable it.
+Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, and cosine decay to `1e-6`. The pretrained encoder and decoder are jointly optimized from the first epoch. bf16 is enabled by default; use `--precision fp32` to disable it.
 
 Deterministic decoding/resizing is cached on disk and loaded onto the GPU once. Random augmentation remains online. Use `--cache-device cpu` when GPU memory is limited. Run configuration, epoch history, checkpoints and test results are saved in `--output`.
 

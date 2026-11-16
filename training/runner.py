@@ -139,10 +139,6 @@ def main():
         for epoch in range(start_epoch, config['epochs']):
             begin = time.perf_counter()
             model.train()
-            if epoch < config['freeze_epochs']:
-                model.freeze_encoder()
-            else:
-                model.unfreeze_encoder()
             order = torch.randperm(len(train[0]), device=train[0].device)
             total, seen = 0., 0
             for step, start in enumerate(range(0, len(order), batch_size)):
@@ -156,7 +152,16 @@ def main():
                     loss = objective(predictions, masks)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f'Nonfinite loss at epoch {epoch+1}, step {step}')
-                loss.backward(); optimizer.step()
+                loss.backward()
+                if epoch == 0 and step == 0:
+                    encoder_parameters = list(model.encoder.parameters())
+                    gradient_norm = torch.linalg.vector_norm(torch.stack([
+                        parameter.grad.detach().float().norm() for parameter in encoder_parameters
+                        if parameter.grad is not None]))
+                    print(json.dumps({'event':'first_step_encoder_gradient',
+                                      'all_encoder_parameters_trainable':all(p.requires_grad for p in encoder_parameters),
+                                      'encoder_gradient_norm':gradient_norm.item()}), flush=True)
+                optimizer.step()
                 total += loss.detach().item()*len(indices); seen += len(indices)
                 if step % 20 == 0:
                     print(f'epoch={epoch+1}/{config["epochs"]} step={step+1}/{math.ceil(len(order)/batch_size)} loss={loss.item():.6f}', flush=True)

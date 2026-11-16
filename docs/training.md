@@ -8,7 +8,7 @@ Official ISIC configuration here means released train/validation/test partitions
 | ISIC2018 | 2594 images | 100 images | 1000 images | 256x256 |
 | Synapse | 18 cases / 2211 listed slices | None | 12 cases | 224x224 |
 
-Presets use 300 epochs, batch size 32, seed 42, AdamW (lr 5e-4, weight decay 1e-3), cosine scheduling to 1e-6, and encoder freezing for 10 epochs. Online augmentation uses independent horizontal/vertical flips and random multiples of 90-degree rotation. Masks use nearest-neighbor resizing. ISIC RGB uses ImageNet normalization. Synapse images use cubic resizing and intensities transformed from [0,1] to [-1,1].
+Presets use 300 epochs, batch size 32, seed 42, AdamW (lr 5e-4, weight decay 1e-3), and cosine scheduling to 1e-6. All encoder and decoder parameters are jointly optimized from epoch one. Online augmentation uses independent horizontal/vertical flips and random multiples of 90-degree rotation. Masks use nearest-neighbor resizing. ISIC RGB uses ImageNet normalization. Synapse images use cubic resizing and intensities transformed from [0,1] to [-1,1].
 
 Each head uses 0.4 CE + 0.6 Dice (BCE with logits for binary). Dice uses squared denominators and includes background for multiclass tasks. Total loss is `(L4 + 0.2*(L0+L1+L2+L3))/1.8`. Adjust `aux_weight` for comparisons.
 
