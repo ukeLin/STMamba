@@ -17,6 +17,7 @@ from model import STMamba
 from training.losses import DeepSupervisionLoss
 from training.data import cached_split, prepare_batch, validate_splits, remap_synapse
 from training.metrics import binary_metrics, volume_metrics
+from training.checkpoints import save_checkpoint, save_recent_weights, preserve_rng
 from torch.utils.data import DataLoader
 
 
@@ -50,12 +51,6 @@ def atomic_json(path, data):
     path = Path(path)
     temporary = path.with_suffix(path.suffix+'.tmp')
     temporary.write_text(json.dumps(data, indent=2, allow_nan=False))
-    os.replace(temporary, path)
-
-
-def save_checkpoint(path, state):
-    temporary = str(path)+'.tmp'
-    torch.save(state, temporary)
     os.replace(temporary, path)
 
 
@@ -134,6 +129,11 @@ def main():
     parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
+    parser.add_argument('--lr', type=float)
+    parser.add_argument('--eval-interval', type=int, default=0,
+                        help='Test every N epochs; zero disables periodic testing')
+    parser.add_argument('--keep-last', type=int, default=0,
+                        help='Retain model weights for the most recent N epochs')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--precision', choices=['fp32','bf16'])
     parser.add_argument('--resume')
@@ -144,6 +144,12 @@ def main():
     args.precision = args.precision or config.get('precision', 'bf16')
     if args.epochs is not None: config['epochs'] = args.epochs
     if args.batch_size is not None: config['batch_size'] = args.batch_size
+    if args.lr is not None: config['lr'] = args.lr
+    if args.eval_interval < 0 or args.keep_last < 0:
+        parser.error('--eval-interval and --keep-last must be nonnegative')
+    if args.eval_interval and config['dataset'] not in ('Synapse', 'ACDC'):
+        parser.error('Periodic volume testing supports Synapse and ACDC')
+    config.update(eval_interval=args.eval_interval, keep_last=args.keep_last)
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     monai_pipeline=config.get('data_pipeline')=='monai'
@@ -177,6 +183,7 @@ def main():
                     bridge_dim=config.get('bridge_dim', 96), use_bridge=config.get('use_bridge', True)).to(device)
     objective = DeepSupervisionLoss(config.get('aux_weight', .2), config.get('ce_weight', .4), config.get('dice_weight', .6))
     batch_size = config['batch_size']
+    periodic_result = None
     if not args.test_only:
         cache_device = device if args.cache_device == 'cuda' else torch.device('cpu')
         if monai_pipeline:
@@ -196,12 +203,13 @@ def main():
             val = cached_split(config, args.data_root, 'val', args.cache_root, cache_device, args.workers) if config['task']=='binary' else None
         optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'], weight_decay=config['weight_decay'])
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, config['epochs'], eta_min=config['min_lr'])
-        start_epoch, best = 0, -1.
+        start_epoch, best, best_test = 0, -1., -1.
         if args.resume:
             state = torch.load(args.resume, map_location=device, weights_only=False)
             model.load_state_dict(state['model']); optimizer.load_state_dict(state['optimizer'])
             scheduler.load_state_dict(state['scheduler'])
             start_epoch, best = state['epoch'], state['best_val_dice']
+            best_test = state.get('best_periodic_test_dice', -1.)
             random.setstate(state['python_rng']); np.random.set_state(state['numpy_rng'])
             torch.set_rng_state(state['torch_rng'].cpu())
             torch.cuda.set_rng_state_all([value.cpu() for value in state['cuda_rng']])
@@ -255,13 +263,31 @@ def main():
             scheduler.step()
             record = {'epoch':epoch+1, 'train_loss':total/seen, 'lr':optimizer.param_groups[0]['lr'],
                       'seconds':time.perf_counter()-begin, 'val':metrics}
+            if args.eval_interval and (epoch+1) % args.eval_interval == 0:
+                evaluation_begin = time.perf_counter()
+                with preserve_rng(model):
+                    test_metrics = synapse_evaluate(model, config, args.data_root, batch_size, device, amp)
+                periodic_result = {'epoch':epoch+1, 'test':test_metrics,
+                                   'selection_split':'test', 'eval_interval':args.eval_interval}
+                atomic_json(output/f'test_epoch_{epoch+1:04d}.json', periodic_result)
+                if test_metrics['dice'] > best_test:
+                    best_test = test_metrics['dice']
+                    save_checkpoint(output/'best_test.pt', {'model':model.state_dict(), 'epoch':epoch+1,
+                                    'test':test_metrics, 'config':config, 'selection_split':'test'})
+                    atomic_json(output/'best_test.json', {**periodic_result,
+                                'checkpoint':str(output/'best_test.pt')})
+                record.update(test_dice=test_metrics['dice'], best_periodic_test_dice=best_test,
+                              test_seconds=time.perf_counter()-evaluation_begin)
+                print(json.dumps({'event':'periodic_test', 'epoch':epoch+1,
+                                  'dice':test_metrics['dice'], 'best_test_dice':best_test}), flush=True)
             with (output/'history.jsonl').open('a') as stream:
                 stream.write(json.dumps(record)+'\n')
             state = {'model':model.state_dict(), 'optimizer':optimizer.state_dict(), 'scheduler':scheduler.state_dict(),
-                     'epoch':epoch+1, 'best_val_dice':best, 'config':config,
+                     'epoch':epoch+1, 'best_val_dice':best, 'best_periodic_test_dice':best_test, 'config':config,
                      'python_rng':random.getstate(), 'numpy_rng':np.random.get_state(),
                      'torch_rng':torch.get_rng_state(), 'cuda_rng':torch.cuda.get_rng_state_all()}
             save_checkpoint(output/'last.pt', state)
+            save_recent_weights(output, state, args.keep_last)
             if improved:
                 save_checkpoint(output/'best.pt', {'model':state['model'], 'epoch':epoch+1, 'val':metrics, 'config':config})
             atomic_json(output/'status.json', {'status':'training', **record, 'total_epochs':config['epochs']})
@@ -270,7 +296,9 @@ def main():
     state = torch.load(checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(state['model'])
     print(f'evaluating fixed checkpoint: {checkpoint}', flush=True)
-    if config['task']=='binary':
+    if periodic_result is not None and periodic_result['epoch'] == state['epoch']:
+        metrics = periodic_result['test']
+    elif config['task']=='binary':
         if monai_pipeline:
             test=make_loader(config,args.data_root,'test',args.cache_root,config.get('workers',6),args.seed)
             metrics=monai_validate(model,test,config,device,amp)
