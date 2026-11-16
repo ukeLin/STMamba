@@ -1,106 +1,108 @@
-<div align="center">
-<h1>STMamba: Shape-consistent Modeling and Tree-guided Fusion for Medical Image Segmentation</h1>
+# STMamba
 
-</div>
+**Shape-Guided Token Reordering and Complementary Tree Fusion for Medical Image Segmentation**
 
-## Abstract
+STMamba combines a VMamba-Tiny V2 encoder with a progressive decoder. Shape-guided scanning (SGS) uses intermediate predictions to reorder tokens. Shape-conditioned complementary tree fusion (SC-CTF) combines reversed path pairs using feature differences, foreground probabilities, and prediction entropy.
 
-Medical image segmentation requires models that preserve lesion spatial continuity while maintaining computational efficiency. Recently, vision Mamba (ViM) models have gained attention for their ability to capture long-range dependencies with linear complexity. However, conventional scanning strategies often disrupt lesion continuity by mixing lesions and background within scanning sequences. To address this, we propose STMamba, which introduces a shape-consistent scanning strategy guided by shape priors to preserve lesion continuity. Furthermore, to enrich feature diversity and control computational cost, we adopt a group-based design that applies variant shape-consistent scanning paths in parallel. In addition, we design a tree-guided fusion strategy that hierarchically aggregates multi-group representations, ensuring more coherent and consistent feature integration. An adaptive expansion layer is further employed to enhance upsampling by jointly modeling spatial and channel information. Extensive experiments on five public datasets, including ISIC2017, ISIC2018, Synapse, BUSI, and ACDC, demonstrate that STMamba consistently outperforms state-of-the-art methods. Our code is available at https://github.com/ukeLin/STMamba.
+This is the revised SC-CTF implementation. Its decoder differs from the earlier serial TGF/BTBB model. Historical results and decoder checkpoints should not be attributed to this revision.
+
+## Architecture
+
+- VMamba-Tiny V2 encoder: depths `[2,2,8,2]`, dimensions `[96,192,384,768]`.
+- Four SGS paths, paired as `(P1,reverse(P1))` and `(P2,reverse(P2))`, with shared inputs and VSS weights within each pair.
+- A two-level conditional fusion tree with spatial Softmax gates and an input residual.
+- Decoder scales `/32,/16,/8,/4`, followed by two 2x adaptive expansion layers.
+- Five supervised outputs: final weight 1, each auxiliary weight 0.2, normalized by 1.8. Each head uses `0.4 CE + 0.6 Dice`.
+
+See [architecture and ablations](docs/architecture.md) and [training protocol](docs/training.md).
 
 ## Installation
 
-We recommend the following platforms: 
-
-```
-Python 3.8 / Pytorch 2.0.0 / NVIDIA GeForce RTX 3090 / CUDA 11.8.0 / Ubuntu
-```
-
-In addition, you need to install the necessary packages using the following instructions:
+Linux, an NVIDIA GPU and a CUDA toolkit are required. Install a PyTorch build compatible with your CUDA environment before installing the remaining dependencies.
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+SELECTIVE_SCAN_MODES=oflex pip install --no-build-isolation ./kernels/selective_scan
+python tools/download_pretrained.py
 ```
 
-And install a runtime environment that supports Mamba:
+The compiler standard defaults to C++20 for PyTorch >=2.10 and C++17 otherwise. Override with `SELECTIVE_SCAN_CXX_STANDARD` if needed. This revision is validated on Python 3.12, PyTorch 2.14.0+cu130 and NVIDIA H20; other combinations have not been validated.
 
-```bash
-cd ./kernels/selective_scan
-pip install -e .
+The download script fetches the ImageNet checkpoint from the [official VMamba release](https://github.com/MzeroMiko/VMamba/releases/download/%23v2cls/vssm1_tiny_0230s_ckpt_epoch_264.pth). Data and model weights are excluded from Git.
+
+## Data
+
+```text
+data/
+├── Synapse/
+│   ├── train_npz/        # NPZ with image and label
+│   └── test_vol_h5/      # H5 with image and label
+├── ISIC2017/
+│   ├── train/{images,masks}/
+│   ├── val/{images,masks}/
+│   └── test/{images,masks}/
+└── ISIC2018/
+    ├── train/{images,masks}/
+    ├── val/{images,masks}/
+    └── test/{images,masks}/
 ```
 
-## Prepare data & Pretrained model
+Use [official ISIC segmentation splits](https://challenge.isic-archive.com/data/): ISIC2017 **2000/150/600**, ISIC2018 **2594/100/1000** for train/validation/test. Masks use the image stem or `_segmentation.png`. Counts and split disjointness are checked.
 
-### Dataset:
-
-#### ISIC datasets
-- The ISIC17 divided into a 7:3 ratio, can be found here {[GoogleDrive](https://drive.google.com/file/d/1ZTOVI5Vp3KTQFDt5moJThJ_xYp2pKBAK/view?usp=sharing)}.
-- The ISIC18 divided into a 7:3 ratio, can be found here {[GoogleDrive](https://drive.google.com/file/d/1AOpPgSEAfgUS2w4rCGaJBbNYbRh3Z_FQ/view?usp=sharing)}.
-- After downloading the datasets, you are supposed to put them into './data/isic17/' and './data/isic18/', and the file format reference is as follows. (take the ISIC17 dataset as an example.)
-
-- './data/isic17/'
-  - train
-    - images
-      - .png
-    - masks
-      - .png
-  - val
-    - images
-      - .png
-    - masks
-      - .png
-
-#### Synapse datasets
-
-- For the Synapse dataset, can be found here {[GoogleDrive](https://drive.google.com/file/d/1-eDXzTgXrTTo7hcrWZnh_wVEtB92PBNz/view?usp=sharing)}.
-
-- After downloading the datasets, you are supposed to put them into './data/Synapse/', and the file format reference is as follows.
-
-- './data/Synapse/'
-  - lists
-    - list_Synapse
-      - all.lst
-      - test_vol.txt
-      - train.txt
-  - test_vol_h5
-    - casexxxx.npy.h5
-  - train_npz
-    - casexxxx_slicexxx.npz
-
-#### ACDC Dataset
-- Download the preprocessed ACDC dataset from [Zenodo](https://zenodo.org/records/15038913) and move into `dataset/acdc/` folder.
-
-#### ImageNet pretrained model:
-
-You should download the pretrained VMamba-Tiny V2 model (vssm1_tiny_0230s_ckpt_epoch_264.pth) from [VMamba](https://github.com/MzeroMiko/VMamba/releases/download/%23v2cls/vssm1_tiny_0230s_ckpt_epoch_264.pth), and then put it in the `model/pretrain/` folder for initialization.
-
-#### Pretrained STMamba weights:
-
-We provide pretrained STMamba weights for five datasets:
-
-- ISIC2017: [Download]()
-- ISIC2018: [Download]()
-- ACDC: [Download]()
-- Synapse: [Download]()
-- BUSI: [Download]()
-
+Synapse uses the supplied **18 training / 12 test cases**, with **2211 listed training slices**. Targets are **eight organs plus background**, not thirteen organs. Configure `original13` source IDs or already converted `indexed9` labels using the [explicit mapping](docs/training.md#synapse-labels).
 
 ## Training
 
-Using the following command to train & evaluate STMamba:
-
-```python
-# Synapse Multi-Organ Dataset
-python train_synapse.py
-# ACDC Dataset
-python train_acdc.py
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py --config configs/synapse.json \
+  --data-root data/Synapse --output runs/synapse
+CUDA_VISIBLE_DEVICES=1 python train.py --config configs/isic2017.json \
+  --data-root data/ISIC2017 --output runs/isic2017
+CUDA_VISIBLE_DEVICES=2 python train.py --config configs/isic2018.json \
+  --data-root data/ISIC2018 --output runs/isic2018
 ```
 
-## Citation
+Defaults: 300 epochs, batch size 32, AdamW, learning rate `5e-4`, weight decay `1e-3`, cosine decay to `1e-6`, and encoder freezing for the first 10 epochs, followed by joint optimization. bf16 is enabled by default; use `--precision fp32` to disable it.
 
+Deterministic decoding/resizing is cached on disk and loaded onto the GPU once. Random augmentation remains online. Use `--cache-device cpu` when GPU memory is limited. Run configuration, epoch history, checkpoints and test results are saved in `--output`.
+
+```bash
+# Resume optimizer, scheduler and RNG state.
+python train.py --config configs/isic2017.json --data-root data/ISIC2017 \
+  --output runs/isic2017 --resume runs/isic2017/last.pt
+
+# Evaluate a fixed checkpoint without training.
+python train.py --config configs/isic2017.json --data-root data/ISIC2017 \
+  --output runs/isic2017 --test-only --checkpoint runs/isic2017/last.pt
 ```
-[Citation for STMamba will go here]
+
+The last checkpoint is tested after training. ISIC validation additionally saves `best.pt`; test data never selects checkpoints. Synapse has no extra validation partition in the supplied protocol and tests only after training.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/test_core.py
+CUDA_VISIBLE_DEVICES=0 python tests/check_model.py
+```
+
+## Layout
+
+```text
+configs/       Dataset training presets
+docs/          Architecture and protocol
+kernels/       Selective scan CUDA sources
+lists/         Synapse case/slice lists
+model/         Encoder, SGS, SC-CTF and decoder
+tests/         Numerical and model regression checks
+tools/         Weight download and multi-GPU launcher
+training/      Caching, augmentation, metrics and runner
+train.py       Training and checkpoint evaluation
+paper_loss.py  Weighted CE/Dice deep supervision
 ```
 
 ## Acknowledgements
 
-We thank the authors of [TransUNet](https://github.com/Beckschen/TransUNet), [Mamba](https://github.com/state-spaces/mamba), [VMamba](https://github.com/MzeroMiko/VMamba), [VM-UNet](https://github.com/JCruan519/VM-UNet), and [CCViM](https://github.com/zymissy/CCViM/tree/master) for making their valuable code & data publicly available.
+The encoder and selective scan build on [VMamba](https://github.com/MzeroMiko/VMamba) and [Mamba](https://github.com/state-spaces/mamba). Their license texts are preserved in [LICENSES](LICENSES). An additional license grant for original STMamba contributions has not been specified.

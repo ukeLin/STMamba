@@ -37,7 +37,8 @@ def get_cuda_bare_metal_version(cuda_dir):
 
     return raw_output, bare_metal_version
 
-MODES = ["core", "ndstate", "oflex"]
+MODES = os.getenv("SELECTIVE_SCAN_MODES", "oflex").split(",")
+CXX_STANDARD = os.getenv("SELECTIVE_SCAN_CXX_STANDARD", "c++20" if Version(torch.__version__.split("+")[0]) >= Version("2.10") else "c++17")
 # MODES = ["core", "ndstate", "oflex", "nrow"]
 
 def get_ext():
@@ -113,10 +114,10 @@ def get_ext():
             name=names.get(MODE, None),
             sources=sources.get(MODE, None),
             extra_compile_args={
-                "cxx": ["-O3", "-std=c++17"],
+                "cxx": ["-O3", f"-std={CXX_STANDARD}"],
                 "nvcc": [
                             "-O3",
-                            "-std=c++17",
+                            f"-std={CXX_STANDARD}",
                             "-U__CUDA_NO_HALF_OPERATORS__",
                             "-U__CUDA_NO_HALF_CONVERSIONS__",
                             "-U__CUDA_NO_BFLOAT16_OPERATORS__",

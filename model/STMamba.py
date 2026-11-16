@@ -13,6 +13,7 @@ class STMamba(nn.Module):
         num_classes: int = 1,
         decoder_depths: tuple = (2, 2, 2, 2),
         drop_path_rate: float = 0.2,
+        fusion_options: dict | None = None,
         **kwargs: Any,
     ) -> None:
         super(STMamba, self).__init__()
@@ -22,12 +23,13 @@ class STMamba(nn.Module):
             num_classes=num_classes,
             depths=decoder_depths,
             drop_path_rate=drop_path_rate,
+            fusion_options=fusion_options,
         )
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_aux: bool = False):
         features = self.encoder(x)
         features = features[::-1]  # Reverse features for decoder
-        return self.decoder(features)
+        return self.decoder(features, return_aux=return_aux)
 
     @torch.no_grad()
     def freeze_encoder(self) -> None:

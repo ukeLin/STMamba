@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import repeat
+from model.complementary_fusion import ShapeConditionedCTF, prediction_condition
+from .saliency_scan import shape_guided_paths
 from timm.models.layers import DropPath, trunc_normal_
 
 from .csm_triton import CrossScanTriton, CrossMergeTriton, CrossScanTriton1b1, getCSM
@@ -298,7 +300,6 @@ class SS2Dv2:
             CrossScan=CrossScan_Regular,
             CrossMerge=CrossMerge_Regular
         )
-        k_group = 4
 
         # in proj =======================================
         d_proj = d_inner if self.disable_z else (d_inner * 2)
@@ -465,7 +466,7 @@ class SS2Dv2:
             ).view(B, W, 2, -1, H).sum(dim=2).permute(0, 2, 3, 1)
             y = y_col
         else:
-            xs = CrossScan.apply(x)  # (B, D, H, W)
+            xs = CrossScan.apply(x, kwargs.get("saliency_mask"))  # (B, D, H, W)
             xs = xs.view(B, D, L)  # (B, D, L)
 
             if no_einsum:
@@ -510,7 +511,7 @@ class SS2Dv2:
             # 确保ys的形状正确
             ys = ys.view(B, 1, D, L)  # (B, 1, D, L)
 
-            y: torch.Tensor = CrossMerge.apply(ys)
+            y: torch.Tensor = CrossMerge.apply(ys.view(B, 1, D, H, W), kwargs.get("saliency_mask"))
 
             if getattr(self, "__DEBUG__", False):
                 setattr(self, "__data__", dict(
@@ -537,7 +538,7 @@ class SS2Dv2:
         if self.with_dconv:
             x = self.conv2d(x)  # (b, d, h, w)
         x = self.act(x)
-        y = self.forward_core(x)
+        y = self.forward_core(x, **kwargs)
         y = self.out_act(y)
         if not self.disable_z:
             y = y * z
@@ -584,278 +585,77 @@ class SS2D(nn.Module, mamba_init, SS2Dv2):
         self.__initv2__(**kwargs)
 
 
-class TreeFusionModule(nn.Module):
-    """树型特征融合模块，实现渐进式特征聚合
-    流程：直接特征融合 -> 应用注意力 -> 输出
-    """
-    def __init__(self, dim, channel_first=True):
+class PathVSSBlock(nn.Module):
+    """Fig. 1(d): two pre-normalized residual branches within each path group."""
+    def __init__(self, dim, drop_path, norm_layer, channel_first, mlp_ratio,
+                 mlp_act_layer, mlp_drop_rate, gmlp, **ssm_options):
         super().__init__()
-        self.dim = dim
-        self.channel_first = channel_first
-        
-        # 特征融合层 - 使用简单高效的融合模块
-        if channel_first:
-            # 第一次融合：特征1和特征2
-            self.fusion1 = nn.Sequential(
-                nn.Conv2d(dim*2, dim*2, kernel_size=1, bias=False),
-                nn.BatchNorm2d(dim*2),
-                nn.SiLU()
-            )
-            
-            # 第二次融合：(特征1+特征2)和特征3
-            self.fusion2 = nn.Sequential(
-                nn.Conv2d(dim*3, dim*3, kernel_size=1, bias=False),
-                nn.BatchNorm2d(dim*3),
-                nn.SiLU()
-            )
-            
-            # 第三次融合：(特征1+特征2+特征3)和特征4
-            self.fusion3 = nn.Sequential(
-                nn.Conv2d(dim*4, dim*4, kernel_size=1, bias=False),
-                nn.BatchNorm2d(dim*4),
-                nn.SiLU()
-            )
-            
+        self.norm = norm_layer(dim)
+        self.op = SS2D(d_model=dim, channel_first=channel_first, **ssm_options)
+        self.norm2 = norm_layer(dim)
+        mlp_class = gMlp if gmlp else Mlp
+        self.mlp = mlp_class(in_features=dim, hidden_features=int(dim * mlp_ratio),
+                             act_layer=mlp_act_layer, drop=mlp_drop_rate, channels_first=channel_first)
+        self.drop_path = DropPath(drop_path)
 
-        else:
-            # 第一次融合：特征1和特征2
-            self.fusion1 = nn.Sequential(
-                nn.Linear(dim*2, dim*2),
-                nn.LayerNorm(dim*2),
-                nn.SiLU()
-            )
-            
-            # 第二次融合：(特征1+特征2)和特征3
-            self.fusion2 = nn.Sequential(
-                nn.Linear(dim*3, dim*3),
-                nn.LayerNorm(dim*3),
-                nn.SiLU()
-            )
-            
-            # 第三次融合：(特征1+特征2+特征3)和特征4
-            self.fusion3 = nn.Sequential(
-                nn.Linear(dim*4, dim*4),
-                nn.LayerNorm(dim*4),
-                nn.SiLU()
-            )
+    def forward(self, x, **scan_options):
+        x = x + self.drop_path(self.op(self.norm(x), **scan_options))
+        return x + self.drop_path(self.mlp(self.norm2(x)))
 
-        
-    def forward(self, x1, x2, x3, x4):
-        """
-        树型特征融合
-        Args:
-            x1, x2, x3, x4: 四个分支的特征，可以是(B, C, H, W)或(B, H, W, C)格式
-        """
-        if self.channel_first:
-            # channel_first格式处理
-            # 第一次融合：特征1和特征2
-            f12 = torch.cat([x1, x2], dim=1)
-            f12 = self.fusion1(f12)
-            
-            # 第二次融合：(特征1+特征2)和特征3
-            f123 = torch.cat([f12, x3], dim=1)
-            f123 = self.fusion2(f123)
-        
-            # 第三次融合：(特征1+特征2+特征3)和特征4
-            f1234 = torch.cat([f123, x4], dim=1)
-            f1234 = self.fusion3(f1234)
-            
-            # 应用通道注意力
-            # attention = self.channel_attention(f1234)
-            out = f1234
-            
-            # 最终归一化
-            # out = self.norm(out)
-            
-        else:
-            # channel_last格式处理 (B, H, W, C)
-            # 第一次融合：特征1和特征2
-            f12 = torch.cat([x1, x2], dim=-1)
-            f12 = self.fusion1(f12)
-        
-            # 第二次融合：(特征1+特征2)和特征3
-            f123 = torch.cat([f12, x3], dim=-1)
-            f123 = self.fusion2(f123)
-        
-            # 第三次融合：(特征1+特征2+特征3)和特征4
-            f1234 = torch.cat([f123, x4], dim=-1)
-            f1234 = self.fusion3(f1234)
-            
-            # 应用通道注意力 - 对于channel_last格式
-            # 先计算空间平均池化
-            B, H, W, C = f1234.shape
-            f1234_pool = f1234.mean(dim=[1, 2])  # (B, C)
-            # attention = self.channel_attention(f1234_pool).unsqueeze(1).unsqueeze(1)  # (B, 1, 1, C)
-            out = f1234
-        
-
-        
-        return out
 
 class VSSBlockGroup(nn.Module):
-    def __init__(
-        self,
-        hidden_dim: int = 0,
-        drop_path: float = 0,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        channel_first=False,
-        # =============================
-        ssm_d_state: int = 16,
-        ssm_ratio=2.0,
-        ssm_dt_rank: Any = "auto",
-        ssm_act_layer=nn.SiLU,
-        ssm_conv: int = 3,
-        ssm_conv_bias=True,
-        ssm_drop_rate: float = 0,
-        ssm_init="v0",
-        forward_type="v2",
-        # =============================
-        mlp_ratio=4.0,
-        mlp_act_layer=nn.GELU,
-        mlp_drop_rate: float = 0.0,
-        gmlp=False,
-        # =============================
-        use_checkpoint: bool = False,
-        post_norm: bool = False,
-        use_tree_fusion: bool = True,  # 添加树型融合开关
-        **kwargs,
-    ):
+    """Paired shared-input/weight SGS paths, followed by a conditional balanced tree."""
+    def __init__(self, hidden_dim=96, drop_path=0., norm_layer=LayerNorm2d,
+                 channel_first=True, ssm_d_state=1, ssm_ratio=1., ssm_dt_rank="auto",
+                 ssm_act_layer=nn.SiLU, ssm_conv=3, ssm_conv_bias=False,
+                 ssm_drop_rate=0., ssm_init="v0", forward_type="v05_noz",
+                 mlp_ratio=4., mlp_act_layer=nn.GELU, mlp_drop_rate=0.,
+                 gmlp=False, use_checkpoint=False, use_tree_fusion=True,
+                 fusion_options=None, **kwargs):
         super().__init__()
+        if hidden_dim % 4:
+            raise ValueError("SGVSS channels must be divisible by four")
         self.channel_first = channel_first
-        self.hidden_dim = hidden_dim
         self.use_checkpoint = use_checkpoint
-        self.post_norm = post_norm
-        self.use_tree_fusion = use_tree_fusion  # 是否使用树型融合
-        
-        # Layer norm
-        self.norm = norm_layer(hidden_dim)
-        
-        # Four SS2D groups
-        group_dim = hidden_dim // 4
-        self.mamba_g1 = SS2D(
-            d_model=group_dim,
-            d_state=ssm_d_state,
-            ssm_ratio=ssm_ratio,
-            dt_rank=ssm_dt_rank,
-            act_layer=ssm_act_layer,
-            d_conv=ssm_conv,
-            conv_bias=ssm_conv_bias,
-            dropout=ssm_drop_rate,
-            initialize=ssm_init,
-            forward_type=forward_type,
-            channel_first=channel_first,
-        )
-        self.mamba_g2 = SS2D(
-            d_model=group_dim,
-            d_state=ssm_d_state,
-            ssm_ratio=ssm_ratio,
-            dt_rank=ssm_dt_rank,
-            act_layer=ssm_act_layer,
-            d_conv=ssm_conv,
-            conv_bias=ssm_conv_bias,
-            dropout=ssm_drop_rate,
-            initialize=ssm_init,
-            forward_type=forward_type,
-            channel_first=channel_first,
-        )
-        self.mamba_g3 = SS2D(
-            d_model=group_dim,
-            d_state=ssm_d_state,
-            ssm_ratio=ssm_ratio,
-            dt_rank=ssm_dt_rank,
-            act_layer=ssm_act_layer,
-            d_conv=ssm_conv,
-            conv_bias=ssm_conv_bias,
-            dropout=ssm_drop_rate,
-            initialize=ssm_init,
-            forward_type=forward_type,
-            channel_first=channel_first,
-        )
-        self.mamba_g4 = SS2D(
-            d_model=group_dim,
-            d_state=ssm_d_state,
-            ssm_ratio=ssm_ratio,
-            dt_rank=ssm_dt_rank,
-            act_layer=ssm_act_layer,
-            d_conv=ssm_conv,
-            conv_bias=ssm_conv_bias,
-            dropout=ssm_drop_rate,
-            initialize=ssm_init,
-            forward_type=forward_type,
-            channel_first=channel_first,
-        )
-        
-        # 添加树型融合模块
+        self.use_tree_fusion = use_tree_fusion
+        fusion_options = dict(fusion_options or {})
+        self.detach_condition = fusion_options.pop("detach_condition", False)
+        options = dict(dim=hidden_dim // 4, drop_path=drop_path, norm_layer=norm_layer,
+                       channel_first=channel_first, mlp_ratio=mlp_ratio,
+                       mlp_act_layer=mlp_act_layer, mlp_drop_rate=mlp_drop_rate, gmlp=gmlp,
+                       d_state=ssm_d_state, ssm_ratio=ssm_ratio, dt_rank=ssm_dt_rank,
+                       act_layer=ssm_act_layer, d_conv=ssm_conv, conv_bias=ssm_conv_bias,
+                       dropout=ssm_drop_rate, initialize=ssm_init, forward_type=forward_type)
+        self.input_a = nn.Conv2d(hidden_dim, hidden_dim // 4, 1)
+        self.input_b = nn.Conv2d(hidden_dim, hidden_dim // 4, 1)
+        # Each module is called twice: same projection, normalization, SSM and FFN.
+        self.pair_vss_14 = PathVSSBlock(**options)
+        self.pair_vss_23 = PathVSSBlock(**options)
         if use_tree_fusion:
-            self.tree_fusion = TreeFusionModule(group_dim, channel_first=True)
+            self.tree_fusion = ShapeConditionedCTF(hidden_dim, hidden_dim // 4, **fusion_options)
 
-        self.drop_path = DropPath(drop_path)
-        
-        if mlp_ratio > 0:
-            _MLP = Mlp if not gmlp else gMlp
-            _MLP = kwargs.get("customized_mlp", None) or _MLP
-            self.norm2 = norm_layer(hidden_dim)
-            mlp_hidden_dim = int(hidden_dim * mlp_ratio)
-            self.mlp = _MLP(
-                in_features=hidden_dim,
-                hidden_features=mlp_hidden_dim,
-                act_layer=mlp_act_layer,
-                drop=mlp_drop_rate,
-                channels_first=channel_first,
-            )
-        else:
-            self.mlp = None
+    def _forward(self, x, prediction_logits):
+        spatial_x = x if self.channel_first else x.permute(0, 3, 1, 2)
+        foreground, condition = prediction_condition(
+            prediction_logits, spatial_x.shape[-2:], detach=self.detach_condition)
+        # The eight scan/restore operations reuse one exact permutation per block.
+        scan_paths = shape_guided_paths(foreground)
+        xa, xb = self.input_a(spatial_x), self.input_b(spatial_x)
+        if not self.channel_first:
+            xa, xb = xa.permute(0, 2, 3, 1), xb.permute(0, 2, 3, 1)
+        inputs = (xa, xb, xb, xa)
+        modules = (self.pair_vss_14, self.pair_vss_23, self.pair_vss_23, self.pair_vss_14)
+        scans = (CrossScan_Regular, CrossScan_Saliency1, CrossScan_Saliency2, CrossScan_Saliency3)
+        merges = (CrossMerge_Regular, CrossMerge_Saliency1, CrossMerge_Saliency2, CrossMerge_Saliency3)
+        outputs = [block(feature, CrossScan=scan, CrossMerge=merge, saliency_mask=scan_paths)
+                   for block, feature, scan, merge in zip(modules, inputs, scans, merges)]
+        if not self.channel_first:
+            outputs = [y.permute(0, 3, 1, 2) for y in outputs]
+        fused = (self.tree_fusion(spatial_x, *outputs, condition) if self.use_tree_fusion
+                 else torch.cat(outputs, 1))
+        return fused if self.channel_first else fused.permute(0, 2, 3, 1)
 
-    def _forward(self, x: torch.Tensor, saliency_mask: Optional[torch.Tensor] = None):
-        if x.dtype == torch.float16:
-            x = x.type(torch.float32)
-            
-        identity = x
-        x = self.norm(x)
-
-        # Split channels into 4 groups
-        x1, x2, x3, x4 = torch.chunk(x, 4, dim=-1 if not self.channel_first else 1)
-
-        # Apply different scan patterns to each group
-        x_mamba1 = self.mamba_g1(x1, CrossScan=CrossScan_Regular, CrossMerge=CrossMerge_Regular, saliency_mask=saliency_mask)
-        x_mamba2 = self.mamba_g2(x2, CrossScan=CrossScan_Saliency1, CrossMerge=CrossMerge_Saliency1, saliency_mask=saliency_mask)
-        x_mamba3 = self.mamba_g3(x3, CrossScan=CrossScan_Saliency2, CrossMerge=CrossMerge_Saliency2, saliency_mask=saliency_mask)
-        x_mamba4 = self.mamba_g4(x4, CrossScan=CrossScan_Saliency3, CrossMerge=CrossMerge_Saliency3, saliency_mask=saliency_mask)
-
-        # 使用树型融合或简单拼接
-        if self.use_tree_fusion:
-            # 确保输入到tree_fusion的特征都是channel_first格式
-            if not self.channel_first:
-                x_mamba1 = x_mamba1.permute(0, 3, 1, 2)
-                x_mamba2 = x_mamba2.permute(0, 3, 1, 2)
-                x_mamba3 = x_mamba3.permute(0, 3, 1, 2)
-                x_mamba4 = x_mamba4.permute(0, 3, 1, 2)
-            
-            x_mamba = self.tree_fusion(x_mamba1, x_mamba2, x_mamba3, x_mamba4)
-            
-            # 如果原始输入是channel_last格式，则转换回来
-            if not self.channel_first:
-                x_mamba = x_mamba.permute(0, 2, 3, 1)
-        else:
-            # 简单拼接
-            x_mamba = torch.cat([x_mamba1, x_mamba2, x_mamba3, x_mamba4], dim=-1 if not self.channel_first else 1)
-
-        # Skip connection
-        x_mamba = x_mamba + identity
-        x_mamba = self.drop_path(x_mamba)
-
-        # MLP if enabled
-        if self.mlp is not None:
-            if self.post_norm:
-                x_mamba = x_mamba + self.drop_path(self.norm2(self.mlp(x_mamba)))
-            else:
-                x_mamba = x_mamba + self.drop_path(self.mlp(self.norm2(x_mamba)))
-
-        return x_mamba
-
-    def forward(self, x: torch.Tensor, saliency_mask: Optional[torch.Tensor] = None):
+    def forward(self, x, prediction_logits):
         if self.use_checkpoint:
-            return checkpoint.checkpoint(self._forward, x, saliency_mask)
-        else:
-            return self._forward(x, saliency_mask)
-
+            return checkpoint.checkpoint(self._forward, x, prediction_logits, use_reentrant=False)
+        return self._forward(x, prediction_logits)
