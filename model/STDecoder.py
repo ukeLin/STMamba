@@ -1,8 +1,8 @@
-"""Progressive decoder with four SC-CTF stages and two final 2x AE layers."""
+"""Progressive SGS/SC-CTF decoder with ordinary bilinear + convolution upsampling."""
 from __future__ import annotations
 import torch
 import torch.nn as nn
-from einops import rearrange
+import torch.nn.functional as F
 from model.vmamba.vmamba import LayerNorm2d, Linear2d
 from model.vmamba.SCVSSBlock import VSSBlockGroup
 from typing import Sequence, Type, Optional
@@ -24,32 +24,16 @@ class MSVSS(nn.Module):
             x = block(x, prediction_logits)
         return x
 
-class LKPE(nn.Module):
-    def __init__(self, dim: int, dim_scale: int = 2, norm_layer: Type[nn.Module] = nn.LayerNorm):
-        super(LKPE, self).__init__()
-        self.dim = dim
-        self.expand = nn.Sequential(
-            nn.Conv2d(dim, dim * 2, kernel_size=1, bias=True),
-            nn.BatchNorm2d(dim * 2),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(dim * 2, dim * 2, kernel_size=3, padding=1, groups=dim * 2, bias=True)
-        )
-        self.norm = norm_layer(dim // dim_scale)
+class BilinearUpsample(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.conv = nn.Sequential(nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+                                  nn.BatchNorm2d(out_channels), nn.ReLU(inplace=True))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.expand(x)
-
-        x = rearrange(x, pattern="b c h w -> b h w c")
-        B, H, W, C = x.shape
-
-        x = x.view(B, H, W, C)
-        x = rearrange(x, pattern="b h w (p1 p2 c)-> b (h p1) (w p2) c", p1=2, p2=2, c=C // 4)
-        x = x.view(B, -1, C // 4)
-        x = self.norm(x)
-        x = x.reshape(B, H * 2, W * 2, C // 4)
-
-        x = rearrange(x, pattern="b h w c -> b c h w")
-        return x
+    def forward(self, x, size=None):
+        x = F.interpolate(x, size=size, scale_factor=2 if size is None else None,
+                          mode='bilinear', align_corners=False)
+        return self.conv(x)
 
 class UpBlock(nn.Module):
     def __init__(
@@ -61,12 +45,12 @@ class UpBlock(nn.Module):
         fusion_options=None,
     ) -> None:
         super(UpBlock, self).__init__()
-        self.up = LKPE(in_channels)
+        self.up = BilinearUpsample(in_channels, out_channels)
         self.concat_layer = Linear2d(2 * out_channels, out_channels)
         self.vss_layer = MSVSS(dim=out_channels, depth=depth, drop_path=drop_path, fusion_options=fusion_options)
 
     def forward(self, input: torch.Tensor, skip: torch.Tensor, prediction_logits: Optional[torch.Tensor] = None) -> torch.Tensor:
-        out = self.up(input)
+        out = self.up(input, size=skip.shape[-2:])
         out = torch.cat(tensors=(out, skip), dim=1)
         out = self.concat_layer(out)
         out = self.vss_layer(out, prediction_logits)
@@ -87,8 +71,8 @@ class Decoder(nn.Module):
             self.up_layers.append(UpBlock(dims[i-1], dims[i], depths[i], rates[offset:offset+depths[i]], fusion_options=fusion_options))
             offset += depths[i]
         self.stage_heads = nn.ModuleList(nn.Conv2d(d, num_classes, 1) for d in dims[:3])
-        # Two applications of Eq. (7)--(8) recover /4 -> /2 -> /1.
-        self.final_expand = nn.Sequential(LKPE(dims[-1]), LKPE(dims[-1] // 2))
+        self.final_expand = nn.Sequential(BilinearUpsample(dims[-1], dims[-1] // 2),
+                                          BilinearUpsample(dims[-1] // 2, dims[-1] // 4))
         self.final_head = nn.Conv2d(dims[-1] // 4, num_classes, 1)
 
     @staticmethod
@@ -97,7 +81,7 @@ class Decoder(nn.Module):
             return logits.sigmoid()
         return logits.softmax(dim=1)[:, 1:].amax(dim=1, keepdim=True)
 
-    def forward(self, features, return_aux=False):
+    def forward(self, features, return_aux=False, output_size=None):
         out = features[0]
         predictions = [self.initial_head(out)]
         prior = predictions[-1]  # full logits: SGS foreground plus multiclass entropy
@@ -108,5 +92,8 @@ class Decoder(nn.Module):
             out = up(out, features[i+1], prior)
             if i < 2:
                 predictions.append(self.stage_heads[i+1](out))
-        predictions.append(self.final_head(self.final_expand(out)))
+        final = self.final_head(self.final_expand(out))
+        if output_size is not None and final.shape[-2:] != tuple(output_size):
+            final = F.interpolate(final, size=output_size, mode='bilinear', align_corners=False)
+        predictions.append(final)
         return tuple(predictions) if return_aux else predictions[-1]

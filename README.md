@@ -1,17 +1,18 @@
-# STMamba
+# STMamba v2
 
 **Shape-Guided Token Reordering and Complementary Tree Fusion for Medical Image Segmentation**
 
-STMamba combines a VMamba-Tiny V2 encoder with a progressive decoder. Shape-guided scanning (SGS) uses intermediate predictions to reorder tokens. Shape-conditioned complementary tree fusion (SC-CTF) combines reversed path pairs using feature differences, foreground probabilities, and prediction entropy.
+STMamba v2 combines an unchanged VMamba-Tiny V2 encoder, a Multi-Scale Context Interaction Bridge (MCIB), and a progressive SGS/SC-CTF decoder with ordinary bilinear upsampling and convolution. SGS uses intermediate predictions to reorder tokens; SC-CTF combines reversed path pairs using feature differences, foreground probabilities, and prediction entropy.
 
-This is the revised SC-CTF implementation. Its decoder differs from the earlier serial TGF/BTBB model. Historical results and decoder checkpoints should not be attributed to this revision.
+This is the MCIB v2 implementation. Historical v1 results and decoder checkpoints should not be attributed to this revision. Existing training jobs keep their saved source snapshots and continue using their original architecture.
 
 ## Architecture
 
 - VMamba-Tiny V2 encoder: depths `[2,2,8,2]`, dimensions `[96,192,384,768]`.
+- MCIB: F2 uses 2x Pixel Unshuffle, F3 is projected directly, and F4 is bilinearly upsampled to the F3 grid (H/16). Three 96-channel branches are pre-mixed with a 1x1 convolution before one joint SS2D. Separate residual projections inject context back into F2/F3/F4; F1 is retained unchanged. The three injection scales start at 0.001.
 - Four SGS paths, paired as `(P1,reverse(P1))` and `(P2,reverse(P2))`, with shared inputs and VSS weights within each pair.
 - A two-level conditional fusion tree with spatial Softmax gates and an input residual.
-- Decoder scales `/32,/16,/8,/4`, followed by two 2x adaptive expansion layers.
+- Decoder scales `/32,/16,/8,/4`, followed by two ordinary 2x bilinear + 3x3 Conv/BN/ReLU layers. The three skip-fusion upsampling layers use the same ordinary operation. AE, LKPE and channel-to-space expansion are removed.
 - Five prediction heads support progressive guidance. ISIC uses final loss weight 1 and auxiliary weights 0.2, normalized by 1.8, with `0.4 CE + 0.6 Dice`. Synapse directly supervises only the final output with `0.5 CE + 0.5 Dice`.
 
 
@@ -101,6 +102,7 @@ The last checkpoint is tested after training. ISIC validation additionally saves
 ```bash
 pytest tests/test_core.py
 CUDA_VISIBLE_DEVICES=0 python tests/check_model.py
+CUDA_VISIBLE_DEVICES=0 python tests/check_mcib.py
 ```
 
 ## Layout
@@ -117,4 +119,4 @@ train.py       Training and checkpoint evaluation
 
 ## Acknowledgements
 
-The encoder and selective scan build on [VMamba](https://github.com/MzeroMiko/VMamba) and [Mamba](https://github.com/state-spaces/mamba). Their license texts are preserved in [LICENSES](LICENSES). An additional license grant for original STMamba contributions has not been specified.
+The encoder and selective scan build on [VMamba](https://github.com/MzeroMiko/VMamba) and [Mamba](https://github.com/state-spaces/mamba). MCIB's multi-scale context modeling is inspired by [SegMAN (CVPR 2025)](https://openaccess.thecvf.com/content/CVPR2025/html/Fu_SegMAN_Omni-scale_Context_Modeling_with_State_Space_Models_and_Local_CVPR_2025_paper.html); it uses native encoder-stage alignment at H/16, cross-scale pre-mixing and stage-specific residual redistribution. Third-party license texts are preserved in [LICENSES](LICENSES). An additional license grant for original STMamba contributions has not been specified.

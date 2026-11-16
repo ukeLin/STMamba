@@ -129,7 +129,8 @@ def main():
     pretrained = Path(__file__).resolve().parents[1]/'model/pretrain/vssm1_tiny_0230s_ckpt_epoch_264.pth'
     if not pretrained.is_file():
         raise FileNotFoundError('Missing encoder checkpoint; run python tools/download_pretrained.py')
-    model = STMamba(num_classes=config['num_classes'], fusion_options=config.get('fusion_options')).to(device)
+    model = STMamba(num_classes=config['num_classes'], fusion_options=config.get('fusion_options'),
+                    bridge_dim=config.get('bridge_dim', 96), use_bridge=config.get('use_bridge', True)).to(device)
     objective = DeepSupervisionLoss(config.get('aux_weight', .2), config.get('ce_weight', .4), config.get('dice_weight', .6))
     batch_size = config['batch_size']
     if not args.test_only:
