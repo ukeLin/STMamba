@@ -86,3 +86,40 @@ def test_periodic_best_and_final_evaluation(tmp_path, monkeypatch):
     assert last['config']['lr'] == .0005
     assert json.loads((output/'test_results.json').read_text())['test']['dice'] == .6
     assert sorted(p.name for p in (output/'checkpoints').glob('*.pt')) == ['epoch_0002.pt','epoch_0003.pt']
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='Training runner requires CUDA')
+def test_standalone_monai_binary_evaluation(tmp_path, monkeypatch):
+    from training import runner, monai_data
+
+    class SmallBinaryModel(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.encoder = torch.nn.Conv2d(3, 1, 1)
+
+        def forward(self, x, return_aux=False):
+            return self.encoder(x)
+
+    config = json.loads((Path(__file__).resolve().parents[1]/'configs/isic2017.json').read_text())
+    config_path = tmp_path/'config.json'
+    config_path.write_text(json.dumps(config))
+    checkpoint = tmp_path/'selected.pt'
+    torch.save({'model':SmallBinaryModel().state_dict(), 'epoch':17}, checkpoint)
+    calls = []
+
+    def loader(cfg, root, split, *args):
+        calls.append(split)
+        return [{'image':torch.ones(2,3,8,8), 'label':torch.ones(2,1,8,8)}]
+
+    monkeypatch.setattr(runner, 'STMamba', SmallBinaryModel)
+    monkeypatch.setattr(runner, 'validate_splits', lambda *args: {})
+    monkeypatch.setattr(monai_data, 'make_loader', loader)
+    output = tmp_path/'evaluation'
+    monkeypatch.setattr(sys, 'argv', ['train.py','--config',str(config_path),'--data-root',str(tmp_path),
+                                    '--output',str(output),'--test-only','--checkpoint',str(checkpoint)])
+    runner.main()
+    assert calls == ['test']
+    result = json.loads((output/'test_results.json').read_text())
+    assert result['status'] == 'complete' and result['epoch'] == 17
+    assert result['checkpoint'] == str(checkpoint)
+    assert 0 <= result['test']['dice'] <= 1

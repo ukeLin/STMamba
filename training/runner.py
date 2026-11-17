@@ -157,6 +157,7 @@ def main():
     monai_pipeline=config.get('data_pipeline')=='monai'
     if monai_pipeline:
         from monai.utils import set_determinism
+        from training.monai_data import make_loader
         set_determinism(args.seed)
     torch.set_num_threads(4)
     torch.backends.cudnn.enabled = config.get('cudnn_enabled', True)
@@ -189,7 +190,6 @@ def main():
     if not args.test_only:
         cache_device = device if args.cache_device == 'cuda' else torch.device('cpu')
         if monai_pipeline:
-            from training.monai_data import make_loader
             train=make_loader(config,args.data_root,'train',args.cache_root,config.get('workers',6),args.seed)
         elif legacy_synapse:
             from training.synapse_data import CachedSynapseDataset, seed_worker
