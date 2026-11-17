@@ -35,6 +35,12 @@ data/
 
 Synapse expects original 13-organ labels and trains on eight organs. ISIC uses the official train/validation/test splits; ACDC uses the supplied 70/10/20 subject split.
 
+GlaS preparation (Train85 / TestB20 validation / TestA60 test):
+
+```bash
+python tools/prepare_glas.py --raw data/GlaS/raw --output data/GlaS
+```
+
 ## Training
 
 ```bash
@@ -42,6 +48,7 @@ python train.py --config configs/synapse.json --data-root data/Synapse --output 
 python train.py --config configs/isic2017.json --data-root data/ISIC2017 --output runs/isic2017
 python train.py --config configs/isic2018.json --data-root data/ISIC2018 --output runs/isic2018
 python train.py --config configs/acdc.json --data-root data/ACDC --output runs/acdc
+python train.py --config configs/glas.json --data-root data/GlaS --output runs/glas
 ```
 
 ## Acknowledgements

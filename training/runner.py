@@ -310,6 +310,19 @@ def main():
     else:
         metrics = synapse_evaluate(model, config, args.data_root, batch_size, device, amp)
     result = {'status':'complete', 'checkpoint':checkpoint, 'epoch':state['epoch'], 'test':metrics}
+    if not args.test_only and config.get('test_best', False) and config['task']=='binary':
+        selected_path = output/'best.pt'
+        selected = torch.load(selected_path, map_location=device, weights_only=False)
+        model.load_state_dict(selected['model'])
+        selected_metrics = (monai_validate(model, test, config, device, amp) if monai_pipeline else
+                            binary_evaluate(model, test, config, batch_size, amp))
+        selected_result = {'status':'complete', 'checkpoint':str(selected_path), 'epoch':selected['epoch'],
+                           'selection_split':'validation', 'test':selected_metrics}
+        selected_output = output/'best_val_eval'
+        selected_output.mkdir(exist_ok=True)
+        atomic_json(selected_output/'test_results.json', selected_result)
+        atomic_json(selected_output/'status.json', selected_result)
+        result['best_validation_evaluation'] = selected_result
     atomic_json(output/'test_results.json', result)
     atomic_json(output/'status.json', result)
     print(json.dumps(result), flush=True)

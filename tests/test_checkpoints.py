@@ -89,7 +89,8 @@ def test_periodic_best_and_final_evaluation(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='Training runner requires CUDA')
-def test_standalone_monai_binary_evaluation(tmp_path, monkeypatch):
+@pytest.mark.parametrize('standalone', [True, False])
+def test_monai_binary_evaluation(tmp_path, monkeypatch, standalone):
     from training import runner, monai_data
 
     class SmallBinaryModel(torch.nn.Module):
@@ -101,6 +102,7 @@ def test_standalone_monai_binary_evaluation(tmp_path, monkeypatch):
             return self.encoder(x)
 
     config = json.loads((Path(__file__).resolve().parents[1]/'configs/isic2017.json').read_text())
+    config['test_best'] = True
     config_path = tmp_path/'config.json'
     config_path.write_text(json.dumps(config))
     checkpoint = tmp_path/'selected.pt'
@@ -115,11 +117,18 @@ def test_standalone_monai_binary_evaluation(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, 'validate_splits', lambda *args: {})
     monkeypatch.setattr(monai_data, 'make_loader', loader)
     output = tmp_path/'evaluation'
-    monkeypatch.setattr(sys, 'argv', ['train.py','--config',str(config_path),'--data-root',str(tmp_path),
-                                    '--output',str(output),'--test-only','--checkpoint',str(checkpoint)])
+    command = ['train.py','--config',str(config_path),'--data-root',str(tmp_path),'--output',str(output)]
+    command += ['--test-only','--checkpoint',str(checkpoint)] if standalone else ['--epochs','2']
+    monkeypatch.setattr(sys, 'argv', command)
     runner.main()
-    assert calls == ['test']
+    assert calls == (['test'] if standalone else ['train','val','test'])
     result = json.loads((output/'test_results.json').read_text())
-    assert result['status'] == 'complete' and result['epoch'] == 17
-    assert result['checkpoint'] == str(checkpoint)
+    assert result['status'] == 'complete' and result['epoch'] == (17 if standalone else 2)
+    assert result['checkpoint'] == str(checkpoint if standalone else output/'last.pt')
     assert 0 <= result['test']['dice'] <= 1
+    if not standalone:
+        selected = torch.load(output/'best.pt', map_location='cpu', weights_only=False)
+        evaluated = json.loads((output/'best_val_eval/test_results.json').read_text())
+        assert evaluated['epoch'] == selected['epoch']
+        assert evaluated['selection_split'] == 'validation'
+        assert result['best_validation_evaluation'] == evaluated

@@ -1,0 +1,30 @@
+{
+  "dataset": "GlaS",
+  "task": "binary",
+  "image_size": 256,
+  "num_classes": 1,
+  "split_counts": {
+    "train": 85,
+    "val": 20,
+    "test": 60
+  },
+  "epochs": 200,
+  "batch_size": 8,
+  "lr": 0.0005,
+  "weight_decay": 0.001,
+  "min_lr": 1e-06,
+  "aux_weight": 0.2,
+  "architecture": "STMamba-v3-LDF",
+  "data_pipeline": "monai",
+  "training_protocol": "monai",
+  "workers": 6,
+  "use_skip_fusion": true,
+  "fusion_options": {
+    "foreground_mode": "nonbackground"
+  },
+  "keep_last": 5,
+  "eval_interval": 0,
+  "test_best": true,
+  "split_protocol": "Train85 / TestB20 validation / TestA60 test",
+  "segmentation_type": "binary_semantic"
+}

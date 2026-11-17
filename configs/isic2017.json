@@ -8,9 +8,9 @@
     "val": 150,
     "test": 600
   },
-  "epochs": 100,
-  "batch_size": 32,
-  "lr": 0.001,
+  "epochs": 200,
+  "batch_size": 8,
+  "lr": 0.0005,
   "weight_decay": 0.001,
   "min_lr": 1e-06,
   "aux_weight": 0.2,
@@ -23,5 +23,6 @@
     "foreground_mode": "nonbackground"
   },
   "keep_last": 5,
-  "eval_interval": 0
+  "eval_interval": 0,
+  "test_best": true
 }

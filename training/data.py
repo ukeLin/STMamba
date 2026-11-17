@@ -53,7 +53,7 @@ def validate_splits(config, root):
         ids = {split:{p.stem for p, _ in values} for split, values in rows.items()}
         counts = {split:len(values) for split, values in rows.items()}
         if counts != config['split_counts']:
-            raise ValueError(f'Official split mismatch: {counts}, expected {config["split_counts"]}')
+            raise ValueError(f'Dataset split mismatch: {counts}, expected {config["split_counts"]}')
     else:
         folder = Path(config.get('list_dir', 'training/splits/synapse'))
         train = (folder/'train.txt').read_text().splitlines()
