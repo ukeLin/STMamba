@@ -5,6 +5,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from model.vmamba.vmamba import LayerNorm2d, Linear2d
 from model.vmamba.SCVSSBlock import VSSBlockGroup
+from model.complementary_fusion import foreground_probability
+from model.skip_fusion import LocalDifferenceFusion
 from typing import Sequence, Type, Optional
 
 class MSVSS(nn.Module):
@@ -43,22 +45,25 @@ class UpBlock(nn.Module):
         depth: int,
         drop_path: Sequence[float] | float,
         fusion_options=None,
+        use_skip_fusion=True,
     ) -> None:
         super(UpBlock, self).__init__()
         self.up = BilinearUpsample(in_channels, out_channels)
         self.concat_layer = Linear2d(2 * out_channels, out_channels)
+        self.skip_fusion = LocalDifferenceFusion(out_channels) if use_skip_fusion else None
         self.vss_layer = MSVSS(dim=out_channels, depth=depth, drop_path=drop_path, fusion_options=fusion_options)
 
     def forward(self, input: torch.Tensor, skip: torch.Tensor, prediction_logits: Optional[torch.Tensor] = None) -> torch.Tensor:
         out = self.up(input, size=skip.shape[-2:])
-        out = torch.cat(tensors=(out, skip), dim=1)
-        out = self.concat_layer(out)
+        base = self.concat_layer(torch.cat((out, skip), dim=1))
+        out = self.skip_fusion(out, skip, base) if self.skip_fusion is not None else base
         out = self.vss_layer(out, prediction_logits)
         return out
 
 class Decoder(nn.Module):
     """Four progressive SC-CTF decoder scales with S0--S4 supervision."""
-    def __init__(self, dims, num_classes, depths=(2, 2, 2, 2), drop_path_rate=0.2, fusion_options=None):
+    def __init__(self, dims, num_classes, depths=(2, 2, 2, 2), drop_path_rate=0.2, fusion_options=None,
+                 use_skip_fusion=True):
         super().__init__()
         if len(dims) != 4 or len(depths) != 4:
             raise ValueError("Expected four encoder scales and four decoder depths")
@@ -68,7 +73,8 @@ class Decoder(nn.Module):
         self.up_layers = nn.ModuleList()
         offset = depths[0]
         for i in range(1, 4):
-            self.up_layers.append(UpBlock(dims[i-1], dims[i], depths[i], rates[offset:offset+depths[i]], fusion_options=fusion_options))
+            self.up_layers.append(UpBlock(dims[i-1], dims[i], depths[i], rates[offset:offset+depths[i]],
+                                         fusion_options=fusion_options, use_skip_fusion=use_skip_fusion))
             offset += depths[i]
         self.stage_heads = nn.ModuleList(nn.Conv2d(d, num_classes, 1) for d in dims[:3])
         self.final_expand = nn.Sequential(BilinearUpsample(dims[-1], dims[-1] // 2),
@@ -77,9 +83,7 @@ class Decoder(nn.Module):
 
     @staticmethod
     def foreground(logits):
-        if logits.shape[1] == 1:
-            return logits.sigmoid()
-        return logits.softmax(dim=1)[:, 1:].amax(dim=1, keepdim=True)
+        return foreground_probability(logits)
 
     def forward(self, features, return_aux=False, output_size=None):
         out = features[0]

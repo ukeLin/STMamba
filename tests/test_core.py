@@ -48,7 +48,7 @@ def test_exact_path_cache_and_gradient():
 def test_full_class_entropy_and_fusion():
     logits = torch.zeros(2, 4, 3, 5, requires_grad=True)
     foreground, condition = prediction_condition(logits, (3,5))
-    torch.testing.assert_close(foreground, torch.full_like(foreground, .25))
+    torch.testing.assert_close(foreground, torch.full_like(foreground, .75))
     torch.testing.assert_close(condition[:, 1], torch.ones_like(condition[:, 1]))
     fusion = ShapeConditionedCTF(16, 4)
     groups = [torch.randn(2,4,3,5) for _ in range(4)]

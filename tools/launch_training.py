@@ -15,8 +15,8 @@ def main():
     parser.add_argument('--devices', default='0,1,2,3')
     parser.add_argument('--datasets', default='synapse,isic2017,isic2018,acdc')
     parser.add_argument('--lr', type=float)
-    parser.add_argument('--eval-interval', type=int, default=0)
-    parser.add_argument('--keep-last', type=int, default=0)
+    parser.add_argument('--eval-interval', type=int)
+    parser.add_argument('--keep-last', type=int)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     run_root = Path(args.run_root).resolve()
@@ -43,7 +43,9 @@ def main():
                    '--cache-device', 'cuda', '--precision', config.get('precision', 'bf16'), '--seed', '42']
         if args.lr is not None:
             command += ['--lr', str(args.lr)]
-        command += ['--eval-interval', str(args.eval_interval), '--keep-last', str(args.keep_last)]
+        interval = args.eval_interval if args.eval_interval is not None else config.get('eval_interval', 0)
+        keep = args.keep_last if args.keep_last is not None else config.get('keep_last', 0)
+        command += ['--eval-interval', str(interval), '--keep-last', str(keep)]
         environment = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu, OMP_NUM_THREADS='4')
         with (output/'train.log').open('ab') as log:
             child = subprocess.Popen(command, cwd=snapshot, env=environment, stdout=log,

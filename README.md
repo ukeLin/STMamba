@@ -1,6 +1,6 @@
-# STMamba v2
+# STMamba
 
-PyTorch implementation of STMamba for medical image segmentation, with a VMamba encoder, Multi-Scale Context Interaction Bridge (MCIB), and complementary tree fusion decoder.
+PyTorch implementation of STMamba for medical image segmentation, with a VMamba encoder, shape-guided scanning, local difference-gated skip fusion, and complementary tree fusion.
 
 ## Installation
 
@@ -46,6 +46,6 @@ python train.py --config configs/acdc.json --data-root data/ACDC --output runs/a
 
 ## Acknowledgements
 
-[VMamba](https://github.com/MzeroMiko/VMamba) · [Mamba](https://github.com/state-spaces/mamba) · [SegMAN](https://openaccess.thecvf.com/content/CVPR2025/html/Fu_SegMAN_Omni-scale_Context_Modeling_with_State_Space_Models_and_Local_CVPR_2025_paper.html) · [MONAI](https://github.com/Project-MONAI/MONAI) · [MSVM-UNet](https://github.com/gndlwch2w/msvm-unet)
+[VMamba](https://github.com/MzeroMiko/VMamba) · [Mamba](https://github.com/state-spaces/mamba) · [Samba](https://github.com/Jia-hao999/Samba) · [MONAI](https://github.com/Project-MONAI/MONAI) · [MSVM-UNet](https://github.com/gndlwch2w/msvm-unet)
 
 Third-party licenses: [LICENSES](LICENSES).

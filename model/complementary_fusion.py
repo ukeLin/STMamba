@@ -9,18 +9,31 @@ from torch import nn
 import torch.nn.functional as F
 
 
-def prediction_condition(logits, size, detach=False):
-    """Return the unchanged SGS foreground definition and Q=[foreground, entropy]."""
+def _foreground(probabilities, mode):
+    if mode not in ('nonbackground', 'max'):
+        raise ValueError('Unsupported foreground mode')
+    if probabilities.shape[1] == 1:
+        return probabilities
+    if mode == 'max':
+        return probabilities[:, 1:].amax(1, keepdim=True)
+    return 1 - probabilities[:, :1]
+
+
+def foreground_probability(logits, mode='nonbackground'):
+    probabilities = logits.float().sigmoid() if logits.shape[1] == 1 else logits.float().softmax(1)
+    return _foreground(probabilities, mode)
+
+
+def prediction_condition(logits, size, detach=False, foreground_mode='nonbackground'):
+    """Q=[foreground, full-class entropy]; multiclass foreground is 1-P(background)."""
     if logits is None or logits.ndim != 4:
         raise ValueError('SC-CTF requires full previous-stage prediction logits (B,K,H,W)')
     logits = logits.detach() if detach else logits
     probabilities = logits.float().sigmoid() if logits.shape[1] == 1 else logits.float().softmax(1)
     probabilities = F.interpolate(probabilities, size=size, mode='bilinear', align_corners=False)
+    foreground = _foreground(probabilities, foreground_mode)
     if logits.shape[1] == 1:
-        foreground = probabilities
         probabilities = torch.cat((1 - probabilities, probabilities), 1)
-    else:
-        foreground = probabilities[:, 1:].amax(1, keepdim=True)
     entropy = -(probabilities * probabilities.clamp_min(1e-7).log()).sum(1, keepdim=True)
     entropy = (entropy / math.log(probabilities.shape[1])).clamp(0, 1)
     return foreground, torch.cat((foreground, entropy), 1)

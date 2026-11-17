@@ -21,9 +21,7 @@
   "matmul_precision": "medium",
   "cudnn_enabled": false,
   "deterministic": true,
-  "architecture": "STMamba-v2-MCIB",
-  "bridge_dim": 96,
-  "use_bridge": true,
+  "architecture": "STMamba-v3-LDF",
   "source_intensity_range": [
     -1,
     1
@@ -33,5 +31,11 @@
     "RV",
     "myocardium",
     "LV"
-  ]
+  ],
+  "use_skip_fusion": true,
+  "fusion_options": {
+    "foreground_mode": "nonbackground"
+  },
+  "keep_last": 5,
+  "eval_interval": 0
 }

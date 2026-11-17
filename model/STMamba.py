@@ -3,7 +3,6 @@ import torch
 import torch.nn as nn
 from model.encoder import Encoder
 from model.STDecoder import Decoder
-from model.mcib import MultiScaleContextInteractionBridge
 from typing import Any
 
 class STMamba(nn.Module):
@@ -15,23 +14,22 @@ class STMamba(nn.Module):
         decoder_depths: tuple = (2, 2, 2, 2),
         drop_path_rate: float = 0.2,
         fusion_options: dict | None = None,
-        bridge_dim: int = 96,
-        use_bridge: bool = True,
+        use_skip_fusion: bool = True,
         **kwargs: Any,
     ) -> None:
         super(STMamba, self).__init__()
         self.encoder = Encoder(name=encoder_name, in_channels=in_channels, **kwargs)
-        self.bridge = MultiScaleContextInteractionBridge(self.encoder.dims, dim=bridge_dim) if use_bridge else nn.Identity()
         self.decoder = Decoder(
             dims=self.encoder.dims[::-1],  # Reverse the dims for decoder
             num_classes=num_classes,
             depths=decoder_depths,
             drop_path_rate=drop_path_rate,
             fusion_options=fusion_options,
+            use_skip_fusion=use_skip_fusion,
         )
 
     def forward(self, x: torch.Tensor, return_aux: bool = False):
-        features = self.bridge(self.encoder(x))
+        features = self.encoder(x)
         features = features[::-1]  # Reverse features for decoder
         return self.decoder(features, return_aux=return_aux, output_size=x.shape[-2:])
 

@@ -620,6 +620,7 @@ class VSSBlockGroup(nn.Module):
         self.use_tree_fusion = use_tree_fusion
         fusion_options = dict(fusion_options or {})
         self.detach_condition = fusion_options.pop("detach_condition", False)
+        self.foreground_mode = fusion_options.pop("foreground_mode", "nonbackground")
         options = dict(dim=hidden_dim // 4, drop_path=drop_path, norm_layer=norm_layer,
                        channel_first=channel_first, mlp_ratio=mlp_ratio,
                        mlp_act_layer=mlp_act_layer, mlp_drop_rate=mlp_drop_rate, gmlp=gmlp,
@@ -637,7 +638,8 @@ class VSSBlockGroup(nn.Module):
     def _forward(self, x, prediction_logits):
         spatial_x = x if self.channel_first else x.permute(0, 3, 1, 2)
         foreground, condition = prediction_condition(
-            prediction_logits, spatial_x.shape[-2:], detach=self.detach_condition)
+            prediction_logits, spatial_x.shape[-2:], detach=self.detach_condition,
+            foreground_mode=self.foreground_mode)
         # The eight scan/restore operations reuse one exact permutation per block.
         scan_paths = shape_guided_paths(foreground)
         xa, xb = self.input_a(spatial_x), self.input_b(spatial_x)

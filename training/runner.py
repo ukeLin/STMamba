@@ -130,9 +130,9 @@ def main():
     parser.add_argument('--epochs', type=int)
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--lr', type=float)
-    parser.add_argument('--eval-interval', type=int, default=0,
+    parser.add_argument('--eval-interval', type=int,
                         help='Test every N epochs; zero disables periodic testing')
-    parser.add_argument('--keep-last', type=int, default=0,
+    parser.add_argument('--keep-last', type=int,
                         help='Retain model weights for the most recent N epochs')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--precision', choices=['fp32','bf16'])
@@ -145,6 +145,8 @@ def main():
     if args.epochs is not None: config['epochs'] = args.epochs
     if args.batch_size is not None: config['batch_size'] = args.batch_size
     if args.lr is not None: config['lr'] = args.lr
+    args.eval_interval = args.eval_interval if args.eval_interval is not None else config.get('eval_interval', 0)
+    args.keep_last = args.keep_last if args.keep_last is not None else config.get('keep_last', 0)
     if args.eval_interval < 0 or args.keep_last < 0:
         parser.error('--eval-interval and --keep-last must be nonnegative')
     if args.eval_interval and config['dataset'] not in ('Synapse', 'ACDC'):
@@ -180,7 +182,7 @@ def main():
     if not pretrained.is_file():
         raise FileNotFoundError('Missing encoder checkpoint; run python tools/download_pretrained.py')
     model = STMamba(num_classes=config['num_classes'], fusion_options=config.get('fusion_options'),
-                    bridge_dim=config.get('bridge_dim', 96), use_bridge=config.get('use_bridge', True)).to(device)
+                    use_skip_fusion=config.get('use_skip_fusion', True)).to(device)
     objective = DeepSupervisionLoss(config.get('aux_weight', .2), config.get('ce_weight', .4), config.get('dice_weight', .6))
     batch_size = config['batch_size']
     periodic_result = None
